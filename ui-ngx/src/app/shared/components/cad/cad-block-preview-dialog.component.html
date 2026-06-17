@@ -1,0 +1,90 @@
+<!--
+
+    Copyright © 2016-2026 The Thingsboard Authors
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<mat-toolbar color="primary">
+  <h2>{{ 'scada.cad-select-blocks' | translate }}</h2>
+  <span class="flex-1"></span>
+  <button mat-icon-button
+          (click)="onCancel()"
+          type="button">
+    <mat-icon class="material-icons">close</mat-icon>
+  </button>
+</mat-toolbar>
+<div mat-dialog-content class="cad-block-preview-content">
+  <div class="cad-toolbar">
+    <mat-form-field appearance="outline" class="cad-search-field">
+      <mat-label>{{ 'scada.cad-search-blocks' | translate }}</mat-label>
+      <input matInput
+             [formControl]="searchControl"
+             placeholder="{{ 'scada.cad-search-blocks' | translate }}">
+      <mat-icon matPrefix>search</mat-icon>
+    </mat-form-field>
+    <button mat-stroked-button
+            color="primary"
+            (click)="toggleAll()">
+      {{ isAllSelected ? ('scada.cad-deselect-all' | translate) : ('scada.cad-select-all' | translate) }}
+    </button>
+    <span class="cad-selected-count">
+      {{ 'scada.cad-selected-count' | translate:{count: selectedBlocks.size} }}
+    </span>
+  </div>
+  @if (blocks.length === 0) {
+    <div class="cad-empty-state">
+      <mat-icon class="material-icons">block</mat-icon>
+      <span>{{ 'scada.cad-no-blocks' | translate }}</span>
+    </div>
+  } @else {
+    @if (blocks.length > 500) {
+      <div class="cad-warning">
+        <mat-icon class="material-icons">warning</mat-icon>
+        <span>{{ 'scada.cad-too-many-blocks' | translate }}</span>
+      </div>
+    }
+    <div class="cad-blocks-grid">
+      @for (block of filteredBlocks; track block.name) {
+        <div class="cad-block-card"
+             tabindex="0"
+             [class.selected]="selectedBlocks.has(block.name)"
+             (click)="toggleBlock(block.name)"
+             (keydown.enter)="toggleBlock(block.name)"
+             (keydown.space)="$event.preventDefault(); toggleBlock(block.name)">
+          <img [src]="'data:image/svg+xml;base64,' + block.svgBase64"
+               [alt]="block.name"
+               class="cad-block-thumbnail">
+          <mat-checkbox [checked]="selectedBlocks.has(block.name)"
+                        (click)="$event.stopPropagation(); toggleBlock(block.name)"
+                        color="primary">
+          </mat-checkbox>
+          <span class="cad-block-name" [matTooltip]="block.name">{{ block.name }}</span>
+        </div>
+      }
+    </div>
+  }
+</div>
+<div mat-dialog-actions class="flex flex-row items-center justify-end">
+  <button mat-button color="primary"
+          type="button"
+          (click)="onCancel()">
+    {{ 'action.cancel' | translate }}
+  </button>
+  <button mat-raised-button color="primary"
+          type="button"
+          [disabled]="selectedBlocks.size === 0"
+          (click)="importSelected()">
+    {{ 'scada.cad-import-selected' | translate:{count: selectedBlocks.size} }}
+  </button>
+</div>

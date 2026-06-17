@@ -206,6 +206,7 @@ import { ResourcesInUseDialogComponent } from '@shared/components/resource/resou
 import { GalleryImageInputComponent } from '@shared/components/image/gallery-image-input.component';
 import { MultipleGalleryImageInputComponent } from '@shared/components/image/multiple-gallery-image-input.component';
 import { EmbedImageDialogComponent } from '@shared/components/image/embed-image-dialog.component';
+import { CadBlockPreviewDialogComponent } from '@shared/components/cad/cad-block-preview-dialog.component';
 import { ImageGalleryDialogComponent } from '@shared/components/image/image-gallery-dialog.component';
 import { RuleChainSelectPanelComponent } from '@shared/components/rule-chain/rule-chain-select-panel.component';
 import { WidgetButtonComponent } from '@shared/components/button/widget-button.component';
@@ -461,6 +462,7 @@ export function MarkedOptionsFactory(markedOptionsService: MarkedOptionsService)
     GalleryImageInputComponent,
     MultipleGalleryImageInputComponent,
     EmbedImageDialogComponent,
+    CadBlockPreviewDialogComponent,
     ImageGalleryDialogComponent,
     WidgetButtonComponent,
     HexInputComponent,
@@ -735,6 +737,7 @@ export function MarkedOptionsFactory(markedOptionsService: MarkedOptionsService)
     GalleryImageInputComponent,
     MultipleGalleryImageInputComponent,
     EmbedImageDialogComponent,
+    CadBlockPreviewDialogComponent,
     ImageGalleryDialogComponent,
     WidgetButtonComponent,
     ScadaSymbolInputComponent,

@@ -77,6 +77,14 @@
                     matTooltipPosition="above">
               <tb-icon>mdi:file-import</tb-icon>
             </button>
+            <button [class.!hidden]="!isScada"
+                    [disabled]="isLoading$ | async"
+                    mat-icon-button
+                    (click)="importCadFile()"
+                    matTooltip="{{ 'scada.import-cad-symbol' | translate }}"
+                    matTooltipPosition="above">
+              <tb-icon>mdi:file-cad</tb-icon>
+            </button>
             <button [class.!hidden]="dialogMode && isScada"
                     class="ml-3 gt-md:!hidden"
                     [disabled]="isLoading$ | async"

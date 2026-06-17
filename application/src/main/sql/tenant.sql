@@ -1,0 +1,1 @@
+INSERT INTO "tenant" ("id", "created_time", "additional_info", "tenant_profile_id", "address", "address2", "city", "country", "email", "phone", "region", "state", "title", "zip", "version") VALUES ('f21570f0-6570-11f1-9578-071530b96ddb', 1781167119743, NULL, 'e08dadc0-6570-11f1-9578-071530b96ddb', NULL, NULL, NULL, NULL, NULL, NULL, 'Global', NULL, 'Tenant', NULL, 1);

@@ -72,6 +72,11 @@ import {
 } from '@shared/components/resource/resources-in-use-dialog.component';
 import { ImagesDatasource } from '@shared/components/image/images-datasource';
 import { EmbedImageDialogComponent, EmbedImageDialogData } from '@shared/components/image/embed-image-dialog.component';
+import {
+  CadBlockPreviewDialogComponent,
+  CadBlockPreviewDialogData
+} from '@shared/components/cad/cad-block-preview-dialog.component';
+import { CadBlockInfo, CadConvertResult } from '@shared/models/cad-block-preview.models';
 
 interface GridImagesFilter {
   search: string;
@@ -643,6 +648,45 @@ export class ImageGalleryComponent extends PageComponent implements OnInit, OnDe
         } else {
           this.updateData();
         }
+      }
+    });
+  }
+
+  importCadFile(): void {
+    this.importExportService.importCadFile().subscribe((cadResult: CadConvertResult | null) => {
+      if (cadResult) {
+        this.dialog.open<CadBlockPreviewDialogComponent, CadBlockPreviewDialogData, any>(
+          CadBlockPreviewDialogComponent, {
+            disableClose: true,
+            panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
+            data: { convertResult: cadResult }
+          }
+        ).afterClosed().subscribe((selectedBlocks: CadBlockInfo[]) => {
+          if (selectedBlocks?.length) {
+            const imports = selectedBlocks.map((block: CadBlockInfo) => {
+              const svgBytes = Uint8Array.from(atob(block.svgBase64), c => c.charCodeAt(0));
+              const svgContent = new TextDecoder().decode(svgBytes);
+              const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+              const file = new File([blob], `${block.name}.svg`, { type: 'image/svg+xml' });
+              return this.imageService.uploadImage(file, block.name, ResourceSubType.SCADA_SYMBOL);
+            });
+            forkJoin(imports).subscribe({
+              next: () => {
+                this.store.dispatch(new ActionNotificationShow({
+                  message: this.translate.instant('scada.cad-import-success', { count: imports.length }),
+                  type: 'success'
+                }));
+                this.updateData();
+              },
+              error: (e) => {
+                this.store.dispatch(new ActionNotificationShow({
+                  message: this.translate.instant('scada.cad-import-failed'),
+                  type: 'error'
+                }));
+              }
+            });
+          }
+        });
       }
     });
   }

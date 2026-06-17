@@ -41,15 +41,16 @@
       }
       @if (importFormGroup.get('importType').value === 'file') {
         <tb-file-input
-          [contentConvertFunction]="loadDataFromJsonContent"
+          [contentConvertFunction]="contentConvertFunction"
           [existingFileName]="currentFileName"
           (fileNameChanged)="currentFileName = $event"
           formControlName="fileContent"
           required
           label="{{importFileLabel | translate}}"
-          dropLabel="{{ 'import.drop-json-file-or' | translate }}"
-          accept=".json,application/json"
-          allowedExtensions="json">
+          dropLabel="{{ dropLabel | translate }}"
+          [accept]="accept"
+          [allowedExtensions]="allowedExtensions"
+          [readAsBinary]="readAsBinary">
         </tb-file-input>
       }
       @if (importFormGroup.get('importType').value === 'content') {

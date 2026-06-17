@@ -31,6 +31,11 @@ export interface ImportDialogData {
   importFileLabel: string;
   enableImportFromContent?: boolean;
   importContentLabel?: string;
+  accept?: string;
+  allowedExtensions?: string;
+  dropLabel?: string;
+  readAsBinary?: boolean;
+  contentConvertFunction?: (content: string) => any;
 }
 
 @Component({
@@ -47,6 +52,11 @@ export class ImportDialogComponent extends DialogComponent<ImportDialogComponent
   importFileLabel: string;
   enableImportFromContent: boolean;
   importContentLabel: string;
+  accept: string;
+  allowedExtensions: string;
+  dropLabel: string;
+  readAsBinary: boolean;
+  contentConvertFunction: (content: string) => any;
 
   importFormGroup: UntypedFormGroup;
 
@@ -66,6 +76,11 @@ export class ImportDialogComponent extends DialogComponent<ImportDialogComponent
     this.importFileLabel = data.importFileLabel;
     this.enableImportFromContent = isDefinedAndNotNull(data.enableImportFromContent) ? data.enableImportFromContent : false;
     this.importContentLabel = data.importContentLabel;
+    this.accept = data.accept || '.json,application/json';
+    this.allowedExtensions = data.allowedExtensions || 'json';
+    this.dropLabel = data.dropLabel || 'import.drop-json-file-or';
+    this.readAsBinary = isDefinedAndNotNull(data.readAsBinary) ? data.readAsBinary : false;
+    this.contentConvertFunction = data.contentConvertFunction || this.loadDataFromJsonContent;
   }
 
   ngOnInit(): void {

@@ -15,6 +15,7 @@
 ///
 
 import { Inject, Injectable, DOCUMENT } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
 import { DashboardService } from '@core/http/dashboard.service';
 import { TranslateService } from '@ngx-translate/core';
 import { select, Store } from '@ngrx/store';
@@ -60,7 +61,7 @@ import {
   ImportEntityData,
   VersionedEntity
 } from '@shared/models/entity.models';
-import { RequestConfig } from '@core/http/http-utils';
+import { defaultHttpUploadOptions, RequestConfig } from '@core/http/http-utils';
 import { RuleChain, RuleChainImport, RuleChainMetaData, RuleChainType } from '@shared/models/rule-chain.models';
 import { RuleChainService } from '@core/http/rule-chain.service';
 import { FiltersInfo } from '@shared/models/query/query.models';
@@ -89,6 +90,7 @@ import {
 import { FormProperty, propertyValid } from '@shared/models/dynamic-form.models';
 import { CalculatedFieldsService } from '@core/http/calculated-fields.service';
 import { CalculatedField } from '@shared/models/calculated-field.models';
+import { CadConvertResult } from '@shared/models/cad-block-preview.models';
 
 export type editMissingAliasesFunction = (widgets: Array<Widget>, isSingleWidget: boolean,
                                           customTitle: string, missingEntityAliases: EntityAliases) => Observable<EntityAliases>;
@@ -117,7 +119,8 @@ export class ImportExportService {
               private utils: UtilsService,
               private itembuffer: ItemBufferService,
               private calculatedFieldsService: CalculatedFieldsService,
-              private dialog: MatDialog) {
+              private dialog: MatDialog,
+              private http: HttpClient) {
 
   }
 
@@ -168,6 +171,34 @@ export class ImportExportService {
           return this.imageService.importImage(imageData);
         }
       }),
+      catchError(() => of(null))
+    );
+  }
+
+  public importCadFile(): Observable<CadConvertResult> {
+    return new Observable<CadConvertResult>(subscriber => {
+      const input = this.document.createElement('input');
+      input.type = 'file';
+      input.accept = '.dwg,.dxf';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) {
+          subscriber.complete();
+          return;
+        }
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        this.http.post<CadConvertResult>('/api/cad/convert', formData,
+          defaultHttpUploadOptions(false, false, false)).subscribe({
+          next: result => {
+            subscriber.next(result);
+            subscriber.complete();
+          },
+          error: err => subscriber.error(err)
+        });
+      };
+      input.click();
+    }).pipe(
       catchError(() => of(null))
     );
   }

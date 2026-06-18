@@ -135,6 +135,7 @@ import {
   DisplayWidgetTypesPanelData
 } from '@home/components/dashboard-page/widget-types-panel.component';
 import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
+import { CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dialog.component';
 import { MobileService } from '@core/services/mobile.service';
 
 import {
@@ -1279,6 +1280,41 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
     }
     this.isAddingWidget = true;
     this.addingLayoutCtx = layoutCtx;
+  }
+
+  importFromCad($event: Event) {
+    if ($event) {
+      $event.stopPropagation();
+    }
+    this.dialog.open<CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult>(
+      CadImportDialogComponent,
+      {
+        disableClose: true,
+        panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
+        data: { dashboard: this.dashboard }
+      }
+    ).afterClosed().subscribe((result) => {
+      if (!result || !result.widgets?.length) {
+        return;
+      }
+      const stateId = this.dashboardCtx.state;
+      const layout = this.dashboard.configuration.states[stateId].layouts.main;
+      layout.gridSettings = layout.gridSettings || {};
+      layout.gridSettings.layoutType = LayoutType.scada;
+      layout.gridSettings.columns = result.targetColumns;
+      layout.gridSettings.margin = 0;
+      layout.gridSettings.outerMargin = false;
+      layout.gridSettings.autoFillHeight = false;
+      for (const widget of result.widgets) {
+        this.dashboardUtils.addWidgetToLayout(
+          this.dashboard, stateId, 'main', widget,
+          result.targetColumns, { sizeX: widget.sizeX, sizeY: widget.sizeY } as any,
+          widget.row, widget.col
+        );
+        this.layouts.main.layoutCtx.widgets.addWidgetId(widget.id);
+      }
+      this.runChangeDetection();
+    });
   }
 
   onAddWidgetClosed() {

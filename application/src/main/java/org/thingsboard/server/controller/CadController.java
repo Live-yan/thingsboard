@@ -27,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.thingsboard.server.queue.util.TbCoreComponent;
 import org.thingsboard.server.service.entitiy.cad.CadConvertResult;
+import org.thingsboard.server.service.entitiy.cad.CadPerEntityResult;
 import org.thingsboard.server.service.entitiy.cad.CadService;
 
 @Slf4j
@@ -43,6 +44,18 @@ public class CadController extends BaseController {
     public ResponseEntity<CadConvertResult> convertCadFile(
             @RequestPart MultipartFile file) throws Exception {
         var result = cadService.convertDwgToSvg(
+                file.getBytes(),
+                file.getOriginalFilename(),
+                getCurrentUser().getTenantId()
+        );
+        return ResponseEntity.ok(result);
+    }
+
+    @PreAuthorize("hasAnyAuthority('SYS_ADMIN', 'TENANT_ADMIN')")
+    @PostMapping(value = "/cad/convert-per-entity", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<CadPerEntityResult> convertCadFilePerEntity(
+            @RequestPart MultipartFile file) throws Exception {
+        var result = cadService.convertDwgToPerEntitySvg(
                 file.getBytes(),
                 file.getOriginalFilename(),
                 getCurrentUser().getTenantId()

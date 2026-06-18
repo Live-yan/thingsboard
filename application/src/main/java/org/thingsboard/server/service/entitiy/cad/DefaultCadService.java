@@ -15,6 +15,9 @@
  */
 package org.thingsboard.server.service.entitiy.cad;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -49,6 +53,14 @@ class DefaultCadService implements CadService {
     private static final List<String> ALLOWED_EXTENSIONS = List.of(".dwg", ".dxf");
 
     private final CadConfig cadConfig;
+    private final ObjectMapper objectMapper;
+
+    @PostConstruct
+    public void validateEnvironment() {
+        if (!Files.exists(Path.of(cadConfig.getScriptPath()))) {
+            log.warn("CAD Python script not found at: {}", cadConfig.getScriptPath());
+        }
+    }
 
     @Override
     public CadConvertResult convertDwgToSvg(byte[] fileContent, String originalFilename, TenantId tenantId) {
@@ -72,6 +84,33 @@ class DefaultCadService implements CadService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("CAD conversion interrupted");
+        } finally {
+            cleanupTempDir(tempDir);
+        }
+    }
+
+    @Override
+    public CadPerEntityResult convertDwgToPerEntitySvg(byte[] fileContent, String originalFilename, TenantId tenantId) {
+        validateFile(fileContent, originalFilename);
+
+        Path tempDir = null;
+        try {
+            tempDir = createTempDir(tenantId);
+            Path inputFile = tempDir.resolve(sanitizeFilename(originalFilename));
+            Files.write(inputFile, fileContent);
+
+            Path outputDir = tempDir.resolve("output");
+            Files.createDirectories(outputDir);
+
+            runPythonConversionPerEntity(inputFile, outputDir);
+
+            return readPerEntityResults(outputDir);
+        } catch (IOException e) {
+            log.error("CAD per-entity conversion I/O error", e);
+            throw new RuntimeException("CAD per-entity conversion failed: I/O error");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("CAD per-entity conversion interrupted");
         } finally {
             cleanupTempDir(tempDir);
         }
@@ -212,6 +251,105 @@ class DefaultCadService implements CadService {
         }
 
         return new CadConvertResult(previewBase64, blocks);
+    }
+
+    private void runPythonConversionPerEntity(Path inputFile, Path outputDir) throws IOException, InterruptedException {
+        List<String> command = List.of(
+                cadConfig.getPythonPath(),
+                cadConfig.getScriptPath(),
+                inputFile.toString(),
+                "--per-entity",
+                "--max-entities", String.valueOf(cadConfig.getMaxEntities()),
+                "-o", outputDir.toString()
+        );
+
+        log.debug("Running CAD per-entity conversion: {}", String.join(" ", command));
+
+        Path stderrFile = outputDir.resolve("conversion.stderr");
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(false);
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectError(stderrFile.toFile());
+
+        int timeout = cadConfig.getConversionTimeoutSeconds();
+        Process process = pb.start();
+
+        boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            log.error("CAD per-entity conversion timed out after {} seconds", timeout);
+            throw new RuntimeException("CAD per-entity conversion timed out after " + timeout + " seconds");
+        }
+
+        String stderr = readStderrFile(stderrFile);
+        if (process.exitValue() != 0) {
+            log.error("Python per-entity conversion failed with exit code {}: {}", process.exitValue(), stderr);
+            throw new RuntimeException("CAD per-entity conversion failed");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private CadPerEntityResult readPerEntityResults(Path outputDir) throws IOException {
+        Path previewFile = outputDir.resolve("preview.svg");
+        String previewBase64 = "";
+        if (Files.exists(previewFile)) {
+            previewBase64 = Base64.getEncoder().encodeToString(Files.readAllBytes(previewFile));
+        }
+
+        Path manifestFile = outputDir.resolve("manifest.json");
+        List<CadEntityInfo> entities = new ArrayList<>();
+        if (Files.exists(manifestFile)) {
+            String manifestJson = Files.readString(manifestFile, StandardCharsets.UTF_8);
+            List<Map<String, Object>> manifestList = objectMapper.readValue(manifestJson, new TypeReference<>() {});
+
+            int maxEntities = cadConfig.getMaxEntities();
+            int count = 0;
+            for (Map<String, Object> entry : manifestList) {
+                if (count >= maxEntities) {
+                    log.warn("Per-entity manifest exceeds maxEntities limit ({}), truncating", maxEntities);
+                    break;
+                }
+
+                String svgFile = (String) entry.get("svgFile");
+                if (svgFile == null) {
+                    continue;
+                }
+
+                Path svgPath = outputDir.resolve(svgFile);
+                if (!Files.exists(svgPath)) {
+                    log.warn("Entity SVG file not found: {}", svgPath);
+                    continue;
+                }
+
+                String svgContent = Files.readString(svgPath, StandardCharsets.UTF_8);
+                if (containsUnsafeContent(svgContent)) {
+                    log.warn("Skipping entity with unsafe SVG content: {}", svgFile);
+                    continue;
+                }
+
+                String svgBase64 = Base64.getEncoder().encodeToString(svgContent.getBytes(StandardCharsets.UTF_8));
+
+                String id = String.valueOf(entry.getOrDefault("id", ""));
+                String type = String.valueOf(entry.getOrDefault("type", ""));
+                double x = toDouble(entry.get("x"));
+                double y = toDouble(entry.get("y"));
+                double width = toDouble(entry.get("width"));
+                double height = toDouble(entry.get("height"));
+                String blockName = entry.get("blockName") != null ? String.valueOf(entry.get("blockName")) : null;
+
+                entities.add(new CadEntityInfo(id, type, svgBase64, x, y, width, height, blockName));
+                count++;
+            }
+        }
+
+        return new CadPerEntityResult(previewBase64, entities);
+    }
+
+    private double toDouble(Object value) {
+        if (value instanceof Number n) {
+            return n.doubleValue();
+        }
+        return 0.0;
     }
 
     private boolean containsUnsafeContent(String svgContent) {

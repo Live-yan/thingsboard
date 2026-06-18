@@ -13,22 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.thingsboard.server.config;
+package org.thingsboard.server.service.entitiy.cad;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.stereotype.Component;
+import lombok.NoArgsConstructor;
 
-@Component
-@ConfigurationProperties(prefix = "cad")
+import java.util.List;
+
 @Data
-public class CadConfig {
+@AllArgsConstructor
+@NoArgsConstructor
+public class CadPerEntityResult {
 
-    private String pythonPath = "python";
-    private String scriptPath;
-    private int conversionTimeoutSeconds = 300;
-    private int maxFileSizeMb = 50;
-    private String tempDir;
-    private int maxEntities = 5000;
+    private String previewSvgBase64;
+    private List<CadEntityInfo> manifest;
 
 }

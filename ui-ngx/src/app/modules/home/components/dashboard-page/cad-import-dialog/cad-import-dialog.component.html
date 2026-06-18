@@ -1,0 +1,152 @@
+<!--
+
+    Copyright © 2016-2026 The Thingsboard Authors
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<mat-toolbar color="primary">
+  <span>{{ 'dashboard.cad-import-dialog.title' | translate }}</span>
+  <span class="flex-1"></span>
+  <button mat-icon-button (click)="dialogRef.close(null)">
+    <mat-icon>close</mat-icon>
+  </button>
+</mat-toolbar>
+
+<mat-dialog-content class="cad-import-dialog-content">
+  @switch (step) {
+    @case ('upload') {
+      <div class="upload-step">
+        @if (isLoading) {
+          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <p class="converting-text">{{ 'dashboard.cad-import-dialog.converting' | translate }}</p>
+        } @else {
+          <mat-icon class="upload-icon">upload_file</mat-icon>
+          <p>{{ 'dashboard.cad-import-dialog.upload-prompt' | translate }}</p>
+          <button mat-raised-button color="primary" (click)="onUploadClick()">
+            {{ 'dashboard.cad-import-dialog.upload-button' | translate }}
+          </button>
+          @if (errorMessage) {
+            <div class="error-message">
+              <mat-icon>error</mat-icon>
+              <span>{{ errorMessage }}</span>
+            </div>
+          }
+          @if (entityCountWarning) {
+            <div class="warning-message">
+              <mat-icon>warning</mat-icon>
+              <span>{{ entityCountWarning }}</span>
+            </div>
+          }
+        }
+      </div>
+    }
+    @case ('preview') {
+      <div class="preview-step">
+        <div class="preview-toolbar">
+          <span class="selection-info">
+            @if (selectedEntityIds.size > 0) {
+              {{ selectedEntityIds.size }} selected
+            } @else {
+              {{ keptEntityCount }} entities
+            }
+          </span>
+          <button mat-stroked-button color="warn" [disabled]="selectedEntityIds.size === 0" (click)="deleteSelected()">
+            <mat-icon>delete</mat-icon>
+            {{ 'dashboard.cad-import-dialog.delete-selected' | translate }}
+          </button>
+          <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="keepSelected()">
+            {{ 'dashboard.cad-import-dialog.keep-selected' | translate }}
+          </button>
+        </div>
+        <div #previewCanvas class="cad-preview-canvas"></div>
+        <p class="preview-hint">{{ 'dashboard.cad-import-dialog.preview-hint' | translate }}</p>
+      </div>
+    }
+    @case ('map') {
+      <div class="map-step">
+        <p class="map-hint">{{ 'dashboard.cad-import-dialog.map-hint' | translate }}</p>
+        <div class="entity-list">
+          @for (entity of keptEntities; track entity.id) {
+            <div class="entity-row" [class.mapped]="mappings.get(entity.id)">
+              <div class="entity-thumbnail">
+                @if (entity.svgBase64) {
+                  <img [src]="'data:image/svg+xml;base64,' + entity.svgBase64" alt="entity" />
+                }
+              </div>
+              <div class="entity-info">
+                <span class="entity-id">{{ entity.id }}</span>
+                <span class="entity-type">{{ entity.type }}</span>
+              </div>
+              <div class="entity-mapping">
+                @if (mappings.get(entity.id); as widgetInfo) {
+                  <span class="mapped-widget">{{ widgetInfo.title }}</span>
+                  <button mat-icon-button color="warn" (click)="removeMapping(entity)">
+                    <mat-icon>link_off</mat-icon>
+                  </button>
+                } @else {
+                  <span class="unmapped-label">{{ 'dashboard.cad-import-dialog.unmapped' | translate }}</span>
+                  <button mat-stroked-button color="primary" (click)="onEntityClick(entity)">
+                    {{ 'dashboard.cad-import-dialog.map' | translate }}
+                  </button>
+                }
+              </div>
+            </div>
+          }
+        </div>
+        <div class="mapping-summary">
+          <span>{{ 'dashboard.cad-import-dialog.mapped-elements' | translate }}: {{ mappedCount }}</span>
+          <span>{{ 'dashboard.cad-import-dialog.unmapped-elements' | translate }}: {{ unmappedCount }}</span>
+        </div>
+      </div>
+    }
+    @case ('review') {
+      <div class="review-step">
+        <p>{{ 'dashboard.cad-import-dialog.review-summary' | translate }}</p>
+        <div class="review-stats">
+          <div class="stat-item">
+            <span class="stat-label">{{ 'dashboard.cad-import-dialog.total-elements' | translate }}</span>
+            <span class="stat-value">{{ keptEntities.length }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">{{ 'dashboard.cad-import-dialog.mapped-elements' | translate }}</span>
+            <span class="stat-value">{{ mappedCount }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">{{ 'dashboard.cad-import-dialog.unmapped-elements' | translate }}</span>
+            <span class="stat-value">{{ unmappedCount }}</span>
+          </div>
+        </div>
+      </div>
+    }
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  @if (step !== 'upload') {
+    <button mat-button (click)="goBack()">{{ 'dashboard.cad-import-dialog.back' | translate }}</button>
+  }
+  <button mat-button (click)="dialogRef.close(null)">{{ 'dashboard.cad-import-dialog.cancel' | translate }}</button>
+  @if (step !== 'review') {
+    <button mat-raised-button color="primary" [disabled]="!canProceed()" (click)="goNext()">
+      {{ 'dashboard.cad-import-dialog.next' | translate }}
+    </button>
+  } @else {
+    <button mat-raised-button color="primary" [disabled]="isLoading" (click)="onImportClick()">
+      @if (isLoading) {
+        <mat-spinner diameter="20"></mat-spinner>
+      }
+      {{ 'dashboard.cad-import-dialog.import-button' | translate }}
+    </button>
+  }
+</mat-dialog-actions>

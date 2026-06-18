@@ -1,0 +1,219 @@
+:host {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.cad-import-dialog-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.upload-step, .preview-step, .map-step, .review-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.upload-icon {
+  font-size: 64px;
+  width: 64px;
+  height: 64px;
+  opacity: 0.5;
+}
+
+.converting-text {
+  margin-top: 16px;
+  opacity: 0.7;
+}
+
+.error-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f44336;
+  margin-top: 16px;
+}
+
+.warning-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ff9800;
+  margin-top: 8px;
+}
+
+.preview-step {
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 0;
+}
+
+.selection-info {
+  font-size: 14px;
+  opacity: 0.7;
+  min-width: 80px;
+}
+
+.cad-preview-canvas {
+  width: 100%;
+  flex: 1;
+  min-height: 400px;
+  overflow: hidden;
+  border-radius: 4px;
+
+  ::ng-deep {
+    .cad-entity {
+      cursor: pointer;
+
+      &.selected {
+        rect {
+          stroke: #1976d2;
+          stroke-width: 2;
+          stroke-dasharray: 4,4;
+        }
+      }
+    }
+  }
+}
+
+.preview-hint {
+  font-size: 12px;
+  opacity: 0.5;
+  text-align: center;
+}
+
+.map-step {
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.map-hint {
+  text-align: center;
+  opacity: 0.7;
+  margin-bottom: 8px;
+}
+
+.entity-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.entity-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+
+  &.mapped {
+    background-color: rgba(76, 175, 80, 0.05);
+    border-color: #4caf50;
+  }
+}
+
+.entity-thumbnail {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1a1a2e;
+  border-radius: 4px;
+  overflow: hidden;
+
+  img {
+    max-width: 100%;
+    max-height: 100%;
+  }
+}
+
+.entity-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 100px;
+
+  .entity-id {
+    font-size: 12px;
+    opacity: 0.7;
+  }
+
+  .entity-type {
+    font-weight: 500;
+  }
+}
+
+.entity-mapping {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mapped-widget {
+  color: #4caf50;
+  font-weight: 500;
+}
+
+.unmapped-label {
+  opacity: 0.5;
+  font-size: 13px;
+}
+
+.mapping-summary {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  padding: 12px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.review-step {
+  gap: 24px;
+}
+
+.review-stats {
+  display: flex;
+  gap: 32px;
+  padding: 24px;
+  background: #f5f5f5;
+  border-radius: 8px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+
+  .stat-label {
+    font-size: 13px;
+    opacity: 0.7;
+  }
+
+  .stat-value {
+    font-size: 32px;
+    font-weight: 600;
+  }
+}

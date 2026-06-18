@@ -246,6 +246,19 @@
                       }
                       @if (isEdit) {
                         <button class="gt-md:!hidden" mat-icon-button
+                                matTooltip="{{ 'dashboard.import-from-cad' | translate }}"
+                                matTooltipPosition="below"
+                                (click)="importFromCad($event)">
+                          <mat-icon>architecture</mat-icon>
+                        </button>
+                        <button class="lt-lg:!hidden" mat-stroked-button
+                                matTooltip="{{ 'dashboard.import-from-cad' | translate }}"
+                                matTooltipPosition="below"
+                                (click)="importFromCad($event)">
+                          <mat-icon>architecture</mat-icon>
+                          {{ 'dashboard.import-from-cad' | translate }}
+                        </button>
+                        <button class="gt-md:!hidden" mat-icon-button
                                 matTooltip="{{ 'dashboard.add-widget-button-text' | translate }}"
                                 matTooltipPosition="below"
                                 (click)="addWidget($event)">

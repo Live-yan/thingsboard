@@ -21,4 +21,6 @@ public interface CadService {
 
     CadConvertResult convertDwgToSvg(byte[] fileContent, String originalFilename, TenantId tenantId);
 
+    CadPerEntityResult convertDwgToPerEntitySvg(byte[] fileContent, String originalFilename, TenantId tenantId);
+
 }

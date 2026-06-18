@@ -91,6 +91,7 @@ import { FormProperty, propertyValid } from '@shared/models/dynamic-form.models'
 import { CalculatedFieldsService } from '@core/http/calculated-fields.service';
 import { CalculatedField } from '@shared/models/calculated-field.models';
 import { CadConvertResult } from '@shared/models/cad-block-preview.models';
+import { CadPerEntityResult } from '@shared/models/cad-per-entity.models';
 
 export type editMissingAliasesFunction = (widgets: Array<Widget>, isSingleWidget: boolean,
                                           customTitle: string, missingEntityAliases: EntityAliases) => Observable<EntityAliases>;
@@ -201,6 +202,26 @@ export class ImportExportService {
     }).pipe(
       catchError(() => of(null))
     );
+  }
+
+  public importCadFilePerEntity(): Observable<CadPerEntityResult> {
+    return new Observable<CadPerEntityResult>(subscriber => {
+      const input = this.document.createElement('input');
+      input.type = 'file';
+      input.accept = '.dwg,.dxf';
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) { subscriber.complete(); return; }
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        this.http.post<CadPerEntityResult>('/api/cad/convert-per-entity', formData,
+          defaultHttpUploadOptions(false, false, false)).subscribe({
+            next: result => { subscriber.next(result); subscriber.complete(); },
+            error: err => subscriber.error(err)
+          });
+      };
+      input.click();
+    }).pipe(catchError(() => of(null)));
   }
 
   public exportCalculatedField(calculatedFieldId: string): void {

@@ -2260,7 +2260,7 @@ mqtt:
 # CAD conversion configuration
 cad:
   python-path: "${CAD_PYTHON_PATH:python}"
-  script-path: "${CAD_SCRIPT_PATH:C:/Users/depths/Desktop/CADproject/test/dwg_to_svg.py}"
+  script-path: "${CAD_SCRIPT_PATH:${pkg.dirname}/scripts/cad/dwg_to_svg.py}"
   conversion-timeout-seconds: "${CAD_CONVERSION_TIMEOUT:300}"
   max-file-size-mb: "${CAD_MAX_FILE_SIZE:50}"
   temp-dir: "${CAD_TEMP_DIR:${java.io.tmpdir}/cad-convert}"

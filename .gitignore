@@ -39,3 +39,7 @@ rebuild-docker.sh
 .run
 .claude
 .planning
+.codegraph
+.sisyphus
+.omx
+.omc

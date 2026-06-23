@@ -79,6 +79,7 @@ import {
   FormPropertyType
 } from '@shared/models/dynamic-form.models';
 import { TbUnit } from '@shared/models/unit.models';
+import { isFiniteSvgViewBox, svgViewBoxAttribute } from '@home/components/widget/lib/scada/scada-svg-viewbox';
 
 export interface ScadaSymbolApi {
   generateElementId: () => string;
@@ -617,6 +618,9 @@ export class ScadaSymbolObject {
       this.box = this.svgShape.bbox();
     }
     origSvg.remove();
+    if (isFiniteSvgViewBox(this.box)) {
+      this.svgShape.attr('viewBox', svgViewBoxAttribute(this.box));
+    }
     this.svgShape.size(this.box.width, this.box.height);
     this.svgShape.addTo(this.rootElement);
   }
@@ -1420,7 +1424,9 @@ class CssScadaSymbolAnimation implements ScadaSymbolAnimation {
             .addText('@keyframes empty-animation {0% {<!--opacity:1;-->}100% {<!--opacity:1;-->}}');
         }
       }
-    } catch (e) {}
+    } catch {
+      // Ignore optional empty-animation setup failures.
+    }
   }
 
   public running(): boolean {
@@ -1907,8 +1913,8 @@ class JsScadaSymbolAnimation implements ScadaSymbolAnimation {
     return this;
   }
 
-  public rotate(_r: number, _cx?: number, _cy?: number): this {
-    (this._runner as any).rotate(...arguments);
+  public rotate(r: number, cx?: number, cy?: number): this {
+    (this._runner as any).rotate(r, cx, cy);
     return this;
   }
 
@@ -1947,13 +1953,13 @@ class JsScadaSymbolAnimation implements ScadaSymbolAnimation {
     return this;
   }
 
-  public relative(_x: number, _y: number): this {
-    (this._runner as any).relative(...arguments);
+  public relative(x: number, y: number): this {
+    (this._runner as any).relative(x, y);
     return this;
   }
 
-  public scale(_x: number, _y?: number, _cx?: number, _cy?: number): this {
-    (this._runner as any).scale(...arguments);
+  public scale(x: number, y?: number, cx?: number, cy?: number): this {
+    (this._runner as any).scale(x, y, cx, cy);
     return this;
   }
 

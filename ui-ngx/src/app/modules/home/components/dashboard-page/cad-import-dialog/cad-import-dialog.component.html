@@ -61,6 +61,12 @@
               {{ keptEntityCount }} entities
             }
           </span>
+          <button mat-stroked-button [color]="previewMode === 'select' ? 'primary' : ''" (click)="previewMode = 'select'" matTooltip="Select mode">
+            <mat-icon>near_me</mat-icon>
+          </button>
+          <button mat-stroked-button [color]="previewMode === 'map' ? 'accent' : ''" (click)="previewMode = 'map'" matTooltip="Map mode">
+            <mat-icon>link</mat-icon>
+          </button>
           <button mat-stroked-button color="warn" [disabled]="selectedEntityIds.size === 0" (click)="deleteSelected()">
             <mat-icon>delete</mat-icon>
             {{ 'dashboard.cad-import-dialog.delete-selected' | translate }}
@@ -68,8 +74,28 @@
           <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="keepSelected()">
             {{ 'dashboard.cad-import-dialog.keep-selected' | translate }}
           </button>
+          <span class="flex-1"></span>
+          <div class="zoom-controls">
+            <button mat-icon-button (click)="zoomOut()" matTooltip="Zoom out">
+              <mat-icon>remove</mat-icon>
+            </button>
+            <span class="zoom-level">{{ (zoomLevel * 100).toFixed(0) }}%</span>
+            <button mat-icon-button (click)="zoomIn()" matTooltip="Zoom in">
+              <mat-icon>add</mat-icon>
+            </button>
+            <button mat-icon-button (click)="resetZoom()" matTooltip="Reset zoom">
+              <mat-icon>fit_screen</mat-icon>
+            </button>
+          </div>
         </div>
-        <div #previewCanvas class="cad-preview-canvas"></div>
+        <div class="preview-canvas-wrapper"
+             (wheel)="onPreviewWheel($event)"
+             (mousedown)="onPreviewMouseDown($event)"
+             (mousemove)="onPreviewMouseMove($event)"
+             (mouseup)="onPreviewMouseUp($event)"
+             (contextmenu)="$event.preventDefault()">
+          <div #previewCanvas class="cad-preview-canvas"></div>
+        </div>
         <p class="preview-hint">{{ 'dashboard.cad-import-dialog.preview-hint' | translate }}</p>
       </div>
     }
@@ -80,9 +106,9 @@
           @for (entity of keptEntities; track entity.id) {
             <div class="entity-row" [class.mapped]="mappings.get(entity.id)">
               <div class="entity-thumbnail">
-                @if (entity.svgBase64) {
-                  <img [src]="'data:image/svg+xml;base64,' + entity.svgBase64" alt="entity" />
-                }
+                 @if (entity.svgBase64) {
+                   <img [src]="getEntityThumbnailUrl(entity)" alt="entity" />
+                 }
               </div>
               <div class="entity-info">
                 <span class="entity-id">{{ entity.id }}</span>
@@ -127,6 +153,12 @@
             <span class="stat-value">{{ unmappedCount }}</span>
           </div>
         </div>
+        @if (isLoading && importTotal > 0) {
+          <div class="import-progress">
+            <mat-progress-bar mode="determinate" [value]="(importProgress / importTotal) * 100"></mat-progress-bar>
+            <span class="progress-text">{{ importProgress }} / {{ importTotal }}</span>
+          </div>
+        }
       </div>
     }
   }

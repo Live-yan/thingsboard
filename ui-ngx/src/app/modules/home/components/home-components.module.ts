@@ -115,6 +115,7 @@ import { EditWidgetComponent } from '@home/components/dashboard-page/edit-widget
 import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
 import { AddWidgetDialogComponent } from '@home/components/dashboard-page/add-widget-dialog.component';
 import { CadImportDialogComponent } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dialog.component';
+import { CadWidgetSelectDialogComponent } from '@home/components/dashboard-page/cad-import-dialog/cad-widget-select-dialog.component';
 import { ManageDashboardLayoutsDialogComponent } from '@home/components/dashboard-page/layout/manage-dashboard-layouts-dialog.component';
 import {
   AddNewBreakpointDialogComponent
@@ -320,6 +321,7 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
       DashboardWidgetSelectComponent,
       AddWidgetDialogComponent,
       CadImportDialogComponent,
+      CadWidgetSelectDialogComponent,
       MoveWidgetsDialogComponent,
       ManageDashboardLayoutsDialogComponent,
       AddNewBreakpointDialogComponent,

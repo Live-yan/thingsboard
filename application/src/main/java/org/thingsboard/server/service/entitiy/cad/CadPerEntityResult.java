@@ -28,5 +28,31 @@ public class CadPerEntityResult {
 
     private String previewSvgBase64;
     private List<CadEntityInfo> manifest;
+    private ModelspaceBounds modelspaceBounds;
+    private PreviewTransform previewTransform;
+
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ModelspaceBounds {
+        private double minX;
+        private double maxX;
+        private double minY;
+        private double maxY;
+    }
+
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class PreviewTransform {
+        private double x;
+        private double y;
+        private double width;
+        private double height;
+        private double scale;
+        private double translateX;
+        private double translateY;
+        private boolean yFlip;
+    }
 
 }

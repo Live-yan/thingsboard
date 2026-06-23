@@ -14,37 +14,52 @@
 /// limitations under the License.
 ///
 
-import { AfterViewChecked, Component, ElementRef, Inject, OnDestroy, ViewChild } from '@angular/core';
+import { AfterViewChecked, ChangeDetectorRef, Component, ElementRef, Inject, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { MAT_DIALOG_DATA, MatDialog, MatDialogRef } from '@angular/material/dialog';
 import { Store } from '@ngrx/store';
 import { AppState } from '@core/core.state';
 import { Router } from '@angular/router';
 import { DialogComponent } from '@shared/components/dialog.component';
-import { CadPerEntityResult, CadEntityInfo } from '@shared/models/cad-per-entity.models';
-import { Widget, WidgetInfo } from '@shared/models/widget.models';
+import { CadPerEntityResult, CadEntityInfo, PreviewTransform } from '@shared/models/cad-per-entity.models';
+import { fullWidgetTypeFqn, Widget, WidgetInfo, widgetType, WidgetType } from '@shared/models/widget.models';
 import { ImportExportService } from '@shared/import-export/import-export.service';
 import { WidgetService } from '@core/http/widget.service';
 import { DashboardUtilsService } from '@core/services/dashboard-utils.service';
-import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
-import { SVG, Svg, G } from '@svgdotjs/svg.js';
-import { forkJoin, Observable, of } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { CadWidgetSelectDialogComponent } from './cad-widget-select-dialog.component';
+import { SVG, Svg, G, Rect } from '@svgdotjs/svg.js';
+import { from, Observable, of } from 'rxjs';
+import { catchError, concatMap, finalize, map, shareReplay, switchMap, toArray } from 'rxjs/operators';
 import { UtilsService } from '@core/services/utils.service';
+import { TranslateService } from '@ngx-translate/core';
+import { ImageService } from '@core/http/image.service';
+import {
+  emptyMetadata,
+  removeScadaSymbolMetadata,
+  updateScadaSymbolMetadataInContent
+} from '@home/components/widget/lib/scada/scada-symbol.models';
+import { mergeDeep } from '@core/utils';
+import { ResourceSubType, prependTbImagePrefix } from '@shared/models/resource.models';
+import { colorBackground } from '@shared/models/widget-settings.models';
+import { buildSelectionHighlight } from './cad-import-geometry';
 
 export interface CadImportDialogData {
   dashboard: any;
+  autoUpload?: boolean;
 }
 
 export interface CadImportDashboardResult {
   widgets: Widget[];
   layoutType: string;
   targetColumns: number;
+  cadAspectRatio?: number;
 }
 
 const VIEWPORT_WIDTH = 1200;
 const VIEWPORT_HEIGHT = 700;
 const TARGET_GRID_COLUMNS = 1000;
 const TARGET_GRID_ROWS = 1000;
+const MIN_MAPPED_WIDGET_SIZE_X = 24;
+const MIN_MAPPED_WIDGET_SIZE_Y = 16;
 const SCADA_SYMBOL_FQN = 'system.scada_symbol';
 
 @Component({
@@ -53,27 +68,42 @@ const SCADA_SYMBOL_FQN = 'system.scada_symbol';
   styleUrls: ['./cad-import-dialog.component.scss'],
   standalone: false
 })
-export class CadImportDialogComponent extends DialogComponent<CadImportDialogComponent, CadImportDashboardResult> implements AfterViewChecked, OnDestroy {
+export class CadImportDialogComponent extends DialogComponent<CadImportDialogComponent, CadImportDashboardResult> implements AfterViewChecked, OnInit, OnDestroy {
 
   @ViewChild('previewCanvas') previewCanvasRef!: ElementRef<HTMLDivElement>;
 
   step: 'upload' | 'preview' | 'map' | 'review' = 'upload';
+  previewMode: 'select' | 'map' = 'select';
   isLoading = false;
+  importProgress = 0;
+  importTotal = 0;
   result: CadPerEntityResult | null = null;
   keptEntities: CadEntityInfo[] = [];
-  mappings: Map<string, WidgetInfo | null> = new Map();
-  selectedEntityIds: Set<string> = new Set();
-  deletedEntityIds: Set<string> = new Set();
+  mappings: Map<string, WidgetInfo | null> = new Map<string, WidgetInfo | null>();
+  selectedEntityIds: Set<string> = new Set<string>();
+  deletedEntityIds: Set<string> = new Set<string>();
   errorMessage = '';
   cadBounds: { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number } | null = null;
+  private msBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
+  private previewTransform: PreviewTransform | null = null;
 
   private svgCanvas: Svg | null = null;
-  private entityGroups: Map<string, G> = new Map();
+  private entityGroups: Map<string, G> = new Map<string, G>();
+  private selectionHighlights: Map<string, Rect> = new Map<string, Rect>();
+  private highlightLayer: G | null = null;
   private previewRendered = false;
   private isDragging = false;
-  private dragStartX = 0;
-  private dragStartY = 0;
   private selectionRect: any = null;
+  private scadaSymbolWidgetType$: Observable<WidgetType> | null = null;
+
+  zoomLevel = 1;
+  private panX = 0;
+  private panY = 0;
+  private isPanning = false;
+  private panStartX = 0;
+  private panStartY = 0;
+  private panStartPanX = 0;
+  private panStartPanY = 0;
 
   constructor(
     protected store: Store<AppState>,
@@ -85,8 +115,17 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     private dashboardUtils: DashboardUtilsService,
     private utils: UtilsService,
     private dialog: MatDialog,
+    private translate: TranslateService,
+    private imageService: ImageService,
+    private cd: ChangeDetectorRef,
   ) {
     super(store, router, dialogRef);
+  }
+
+  ngOnInit(): void {
+    if (this.data.autoUpload) {
+      this.onUploadClick();
+    }
   }
 
   ngAfterViewChecked(): void {
@@ -106,15 +145,20 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       next: (result) => {
         if (!result) {
           this.isLoading = false;
+          if (this.data.autoUpload) {
+            this.dialogRef.close(null);
+          }
           return;
         }
         if (result.manifest.length === 0) {
-          this.errorMessage = 'No entities found in the CAD file';
+          this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
           this.isLoading = false;
           return;
         }
         this.result = result;
         this.computeCadBounds();
+        this.msBounds = result.modelspaceBounds || null;
+        this.previewTransform = result.previewTransform || null;
         this.keptEntities = [...result.manifest];
         this.deletedEntityIds.clear();
         this.selectedEntityIds.clear();
@@ -124,13 +168,25 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         this.step = 'preview';
       },
       error: (err) => {
-        this.errorMessage = err?.error?.message || err?.message || 'Conversion failed';
+        this.errorMessage = err?.error?.message || err?.message || this.translate.instant('dashboard.cad-import-dialog.converting');
         this.isLoading = false;
       }
     });
   }
 
   private computeCadBounds(): void {
+    if (this.result?.modelspaceBounds) {
+      const ms = this.result.modelspaceBounds;
+      this.cadBounds = {
+        minX: ms.minX,
+        minY: ms.minY,
+        maxX: ms.maxX,
+        maxY: ms.maxY,
+        width: ms.maxX - ms.minX || 1,
+        height: ms.maxY - ms.minY || 1
+      };
+      return;
+    }
     if (!this.result?.manifest?.length) return;
     const entities = this.result.manifest;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -152,113 +208,208 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     const container = this.previewCanvasRef.nativeElement;
     container.innerHTML = '';
 
-    this.svgCanvas = SVG().addTo(container).size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
-    this.svgCanvas.css({ border: '1px solid #ccc', background: '#1a1a2e' });
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const outerSvg = document.createElementNS(svgNs, 'svg');
+    outerSvg.setAttribute('width', String(VIEWPORT_WIDTH));
+    outerSvg.setAttribute('height', String(VIEWPORT_HEIGHT));
+    outerSvg.style.display = 'block';
+
+    if (this.previewTransform) {
+      outerSvg.setAttribute('viewBox',
+        `${this.previewTransform.x} ${this.previewTransform.y} ${this.previewTransform.width} ${this.previewTransform.height}`);
+    } else {
+      outerSvg.setAttribute('viewBox', `0 0 ${VIEWPORT_WIDTH} ${VIEWPORT_HEIGHT}`);
+    }
+
+    container.appendChild(outerSvg);
 
     if (this.result.previewSvgBase64) {
       const previewSvg = atob(this.result.previewSvgBase64);
-      const bgGroup = this.svgCanvas.group();
-      bgGroup.svg(previewSvg);
-      bgGroup.opacity(0.3);
+      const bg = document.createElementNS(svgNs, 'g');
+      bg.setAttribute('class', 'cad-preview-bg');
+      bg.innerHTML = this.extractSvgContent(previewSvg);
+      outerSvg.appendChild(bg);
     }
 
+    this.svgCanvas = SVG(outerSvg) as Svg;
+
     this.entityGroups.clear();
-    for (const entity of this.result.manifest) {
-      if (this.deletedEntityIds.has(entity.id)) continue;
-      this.renderEntity(entity);
-    }
+    this.selectionHighlights.clear();
+    this.highlightLayer = this.svgCanvas.group().addClass('cad-selection-highlight-layer');
+    this.bindPreviewEntityGroups();
 
     this.setupDragSelect();
   }
 
-  private renderEntity(entity: CadEntityInfo): void {
-    if (!this.svgCanvas || !this.cadBounds) return;
-
-    const displayX = ((entity.x - this.cadBounds.minX) / this.cadBounds.width) * VIEWPORT_WIDTH;
-    const displayY = VIEWPORT_HEIGHT - ((entity.y + entity.height - this.cadBounds.minY) / this.cadBounds.height) * VIEWPORT_HEIGHT;
-    const displayW = Math.max(2, (entity.width / this.cadBounds.width) * VIEWPORT_WIDTH);
-    const displayH = Math.max(2, (entity.height / this.cadBounds.height) * VIEWPORT_HEIGHT);
-
-    const group = this.svgCanvas.group()
-      .addClass('cad-entity')
-      .data('entity-id', entity.id);
-
-    group.rect(displayW, displayH)
-      .move(displayX, displayY)
-      .fill('transparent')
-      .stroke({ width: 0 });
-
-    if (entity.svgBase64) {
-      try {
-        const entitySvg = atob(entity.svgBase64);
-        const innerGroup = this.svgCanvas.group();
-        innerGroup.svg(entitySvg);
-        innerGroup.move(displayX, displayY);
-        const bbox = innerGroup.bbox();
-        if (bbox.width > 0 && bbox.height > 0) {
-          const scaleX = displayW / bbox.width;
-          const scaleY = displayH / bbox.height;
-          const scale = Math.min(scaleX, scaleY);
-          innerGroup.transform({ scale, origin: [displayX, displayY] });
+  private bindPreviewEntityGroups(): void {
+    if (!this.previewCanvasRef?.nativeElement) return;
+    const groups = this.previewCanvasRef.nativeElement.querySelectorAll('g[data-cad-entity-id]');
+    groups.forEach(groupEl => {
+      const g = groupEl as SVGGElement;
+      const entityId = g.getAttribute('data-cad-entity-id');
+      if (!entityId || this.deletedEntityIds.has(entityId)) return;
+      g.style.cursor = 'pointer';
+      g.classList.add('cad-entity');
+      g.addEventListener('click', (event: Event) => {
+        event.stopPropagation();
+        if (this.previewMode === 'map') {
+          const entity = this.result?.manifest.find(e => e.id === entityId);
+          if (entity) this.mapEntityFromPreview(entity);
+        } else {
+          this.toggleEntitySelection(entityId);
         }
-        group.add(innerGroup);
-      } catch (e) {
+      });
+      const svgGroup = SVG(g) as G;
+      this.entityGroups.set(entityId, svgGroup);
+    });
+    this.updateSelectionVisuals();
+    this.updateMappingVisuals();
+  }
+
+  private extractSvgContent(svgStr: string): string {
+    const s = svgStr.trim();
+    const svgTagEnd = s.indexOf('>');
+    if (svgTagEnd === -1) return s;
+    const closeTag = '</svg>';
+    const closeIdx = s.lastIndexOf(closeTag);
+    if (closeIdx > svgTagEnd) {
+      return s.substring(svgTagEnd + 1, closeIdx);
+    }
+    return s.substring(svgTagEnd + 1);
+  }
+
+  private toSvgCoords(clientX: number, clientY: number): { x: number; y: number } {
+    const rect = this.previewCanvasRef.nativeElement.getBoundingClientRect();
+    const screenX = (clientX - rect.left) / this.zoomLevel - this.panX;
+    const screenY = (clientY - rect.top) / this.zoomLevel - this.panY;
+    if (this.previewTransform) {
+      const t = this.previewTransform;
+      const svgX = t.x + (screenX / VIEWPORT_WIDTH) * t.width;
+      const svgY = t.y + (screenY / VIEWPORT_HEIGHT) * t.height;
+      return { x: svgX, y: svgY };
+    }
+    return { x: screenX, y: screenY };
+  }
+
+  private applyTransform(): void {
+    const svgEl = this.previewCanvasRef?.nativeElement?.querySelector('svg');
+    if (!svgEl) return;
+    svgEl.style.transformOrigin = '0 0';
+    svgEl.style.transform = `scale(${this.zoomLevel}) translate(${this.panX}px, ${this.panY}px)`;
+  }
+
+  onPreviewWheel(event: WheelEvent): void {
+    event.preventDefault();
+    const container = this.previewCanvasRef.nativeElement;
+    const rect = container.getBoundingClientRect();
+    const mouseX = (event.clientX - rect.left) / this.zoomLevel - this.panX;
+    const mouseY = (event.clientY - rect.top) / this.zoomLevel - this.panY;
+
+    const oldZoom = this.zoomLevel;
+    const delta = event.deltaY > 0 ? 0.9 : 1.1;
+    this.zoomLevel = Math.max(0.1, Math.min(5, this.zoomLevel * delta));
+
+    // ponytail: zoom-to-point — keep the SVG point under the cursor fixed on screen
+    // screen = zoom*(svgX + panX); solving newPan = (oldZoom/newZoom)*(mx+oldPan) - mx
+    this.panX = (mouseX + this.panX) * (oldZoom / this.zoomLevel) - mouseX;
+    this.panY = (mouseY + this.panY) * (oldZoom / this.zoomLevel) - mouseY;
+
+    this.applyTransform();
+  }
+
+  onPreviewMouseDown(event: MouseEvent): void {
+    if (event.ctrlKey || event.button === 1 || event.button === 2) {
+      event.preventDefault();
+      this.isPanning = true;
+      this.isDragging = false;
+      this.panStartX = event.clientX;
+      this.panStartY = event.clientY;
+      this.panStartPanX = this.panX;
+      this.panStartPanY = this.panY;
+      if (this.previewCanvasRef) {
+        this.previewCanvasRef.nativeElement.style.cursor = 'grabbing';
       }
     }
-
-    group.css({ cursor: 'pointer' });
-    group.on('click', (event: Event) => {
-      event.stopPropagation();
-      this.toggleEntitySelection(entity.id);
-    });
-
-    this.entityGroups.set(entity.id, group);
   }
+
+  onPreviewMouseMove(event: MouseEvent): void {
+    if (this.isPanning) {
+      const dx = (event.clientX - this.panStartX) / this.zoomLevel;
+      const dy = (event.clientY - this.panStartY) / this.zoomLevel;
+      this.panX = this.panStartPanX + dx;
+      this.panY = this.panStartPanY + dy;
+      this.applyTransform();
+      return;
+    }
+    if (!this.isDragging || !this.selectionRect) return;
+    const svgCoords = this.toSvgCoords(event.clientX, event.clientY);
+    const startCoords = this.toSvgCoords(this.dragScreenStartX, this.dragScreenStartY);
+    const x = Math.min(startCoords.x, svgCoords.x);
+    const y = Math.min(startCoords.y, svgCoords.y);
+    const w = Math.abs(svgCoords.x - startCoords.x);
+    const h = Math.abs(svgCoords.y - startCoords.y);
+    this.selectionRect.move(x, y).size(w, h);
+  }
+
+  onPreviewMouseUp(event: MouseEvent): void {
+    if (this.isPanning) {
+      this.isPanning = false;
+      if (this.previewCanvasRef) {
+        this.previewCanvasRef.nativeElement.style.cursor = 'default';
+      }
+      return;
+    }
+    if (!this.isDragging || !this.selectionRect) return;
+    this.isDragging = false;
+    const svgCoords = this.toSvgCoords(event.clientX, event.clientY);
+    const startCoords = this.toSvgCoords(this.dragScreenStartX, this.dragScreenStartY);
+    const selX = Math.min(startCoords.x, svgCoords.x);
+    const selY = Math.min(startCoords.y, svgCoords.y);
+    const selW = Math.abs(svgCoords.x - startCoords.x);
+    const selH = Math.abs(svgCoords.y - startCoords.y);
+
+    if (selW > 5 && selH > 5) {
+      this.selectEntitiesInRect(selX, selY, selW, selH);
+    }
+
+    this.selectionRect.remove();
+    this.selectionRect = null;
+  }
+
+  zoomIn(): void {
+    this.zoomLevel = Math.min(5, this.zoomLevel * 1.3);
+    this.applyTransform();
+  }
+
+  zoomOut(): void {
+    this.zoomLevel = Math.max(0.1, this.zoomLevel / 1.3);
+    this.applyTransform();
+  }
+
+  resetZoom(): void {
+    this.zoomLevel = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.applyTransform();
+  }
+
+  private dragScreenStartX = 0;
+  private dragScreenStartY = 0;
 
   private setupDragSelect(): void {
     if (!this.svgCanvas) return;
 
     this.svgCanvas.on('mousedown', (event: MouseEvent) => {
       if ((event.target as HTMLElement).closest('.cad-entity')) return;
+      if (event.ctrlKey || event.button !== 0) return;
       this.isDragging = true;
-      const rect = this.previewCanvasRef.nativeElement.getBoundingClientRect();
-      this.dragStartX = event.clientX - rect.left;
-      this.dragStartY = event.clientY - rect.top;
+      this.dragScreenStartX = event.clientX;
+      this.dragScreenStartY = event.clientY;
+      const svgCoords = this.toSvgCoords(event.clientX, event.clientY);
       this.selectionRect = this.svgCanvas!.rect(0, 0)
-        .move(this.dragStartX, this.dragStartY)
+        .move(svgCoords.x, svgCoords.y)
         .fill({ color: '#1976d2', opacity: 0.2 })
         .stroke({ color: '#1976d2', width: 1, dasharray: '4,4' });
-    });
-
-    this.svgCanvas.on('mousemove', (event: MouseEvent) => {
-      if (!this.isDragging || !this.selectionRect) return;
-      const rect = this.previewCanvasRef.nativeElement.getBoundingClientRect();
-      const currentX = event.clientX - rect.left;
-      const currentY = event.clientY - rect.top;
-      const x = Math.min(this.dragStartX, currentX);
-      const y = Math.min(this.dragStartY, currentY);
-      const w = Math.abs(currentX - this.dragStartX);
-      const h = Math.abs(currentY - this.dragStartY);
-      this.selectionRect.move(x, y).size(w, h);
-    });
-
-    this.svgCanvas.on('mouseup', (event: MouseEvent) => {
-      if (!this.isDragging || !this.selectionRect) return;
-      this.isDragging = false;
-      const rect = this.previewCanvasRef.nativeElement.getBoundingClientRect();
-      const endX = event.clientX - rect.left;
-      const endY = event.clientY - rect.top;
-      const selX = Math.min(this.dragStartX, endX);
-      const selY = Math.min(this.dragStartY, endY);
-      const selW = Math.abs(endX - this.dragStartX);
-      const selH = Math.abs(endY - this.dragStartY);
-
-      if (selW > 5 && selH > 5) {
-        this.selectEntitiesInRect(selX, selY, selW, selH);
-      }
-
-      this.selectionRect.remove();
-      this.selectionRect = null;
     });
   }
 
@@ -284,18 +435,63 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   private updateSelectionVisuals(): void {
+    this.selectionHighlights.forEach(highlight => highlight.remove());
+    this.selectionHighlights.clear();
     for (const [id, group] of this.entityGroups) {
+      const node = group.node as SVGGElement;
+      if (!node) continue;
+      node.classList.remove('selected');
       if (this.selectedEntityIds.has(id)) {
-        group.addClass('selected');
-      } else {
-        group.removeClass('selected');
+        node.classList.add('selected');
+        this.addSelectionHighlight(id, group);
       }
     }
+  }
+
+  private addSelectionHighlight(entityId: string, group: G): void {
+    if (!this.highlightLayer) return;
+    const entity = this.result?.manifest.find(e => e.id === entityId);
+    const bbox = entity && this.hasPreviewBounds(entity)
+      ? {
+          x: entity.previewX,
+          y: entity.previewY,
+          width: entity.previewWidth,
+          height: entity.previewHeight
+        }
+      : group.bbox();
+    if (!isFinite(bbox.width) || !isFinite(bbox.height) || bbox.width <= 0 || bbox.height <= 0) return;
+    const highlightBox = buildSelectionHighlight(
+      bbox,
+      this.previewTransform,
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT,
+      this.zoomLevel
+    );
+    const highlight = this.highlightLayer.rect(highlightBox.width, highlightBox.height)
+      .move(highlightBox.x, highlightBox.y)
+      .fill({ color: '#ffeb3b', opacity: 0.14 })
+      .stroke({ color: '#ff3d00', width: highlightBox.strokeWidth, dasharray: highlightBox.dasharray })
+      .attr({
+        'pointer-events': 'none',
+        'vector-effect': 'non-scaling-stroke',
+        'rx': highlightBox.cornerRadius,
+        'ry': highlightBox.cornerRadius
+      });
+    this.selectionHighlights.set(entityId, highlight);
+  }
+
+  private hasPreviewBounds(entity: CadEntityInfo): boolean {
+    return Number.isFinite(entity.previewX) && Number.isFinite(entity.previewY) &&
+      Number.isFinite(entity.previewWidth) && Number.isFinite(entity.previewHeight) &&
+      entity.previewWidth > 0 && entity.previewHeight > 0;
   }
 
   deleteSelected(): void {
     for (const id of this.selectedEntityIds) {
       this.deletedEntityIds.add(id);
+      this.mappings.delete(id);
+      this.selectionHighlights.get(id)?.remove();
+      this.selectionHighlights.delete(id);
       const group = this.entityGroups.get(id);
       if (group) {
         group.remove();
@@ -311,22 +507,51 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   onEntityClick(entity: CadEntityInfo): void {
-    const dialogRef = this.dialog.open(DashboardWidgetSelectComponent, {
+    const dialogRef = this.dialog.open(CadWidgetSelectDialogComponent, {
       panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
       data: { scadaFirst: true }
     });
-    dialogRef.componentInstance.widgetSelected.subscribe((widgetInfo: WidgetInfo) => {
-      this.mappings.set(entity.id, widgetInfo);
-      dialogRef.close();
+    dialogRef.afterClosed().subscribe((widgetInfo: WidgetInfo | undefined) => {
+      if (widgetInfo) {
+        this.mappings.set(entity.id, widgetInfo);
+        this.updateMappingVisuals();
+      }
     });
+  }
+
+  private mapEntityFromPreview(entity: CadEntityInfo): void {
+    const dialogRef = this.dialog.open(CadWidgetSelectDialogComponent, {
+      panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
+      data: { scadaFirst: true }
+    });
+    dialogRef.afterClosed().subscribe((widgetInfo: WidgetInfo | undefined) => {
+      if (widgetInfo) {
+        this.mappings.set(entity.id, widgetInfo);
+        this.updateMappingVisuals();
+      }
+    });
+  }
+
+  private updateMappingVisuals(): void {
+    for (const [id, group] of this.entityGroups) {
+      const node = group.node as SVGGElement;
+      if (!node) continue;
+      if (this.mappings.has(id) && this.mappings.get(id)) {
+        node.classList.add('mapped');
+      } else {
+        node.classList.remove('mapped');
+      }
+    }
   }
 
   assignWidget(entity: CadEntityInfo, widgetInfo: WidgetInfo | null): void {
     this.mappings.set(entity.id, widgetInfo);
+    this.updateMappingVisuals();
   }
 
   removeMapping(entity: CadEntityInfo): void {
     this.mappings.set(entity.id, null);
+    this.updateMappingVisuals();
   }
 
   get mappedCount(): number {
@@ -341,98 +566,261 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     return this.keptEntities.length - this.mappedCount;
   }
 
+  private ensureCompleteSvg(svgContent: string, entity: CadEntityInfo): string {
+    if (!svgContent) return '';
+    let trimmed = svgContent.trim();
+    while (true) {
+      if (trimmed.startsWith('<?xml')) {
+        const end = trimmed.indexOf('?>');
+        if (end === -1) break;
+        trimmed = trimmed.slice(end + 2).trim();
+      } else if (trimmed.startsWith('<!DOCTYPE')) {
+        const end = trimmed.indexOf('>');
+        if (end === -1) break;
+        trimmed = trimmed.slice(end + 1).trim();
+      } else if (trimmed.startsWith('<!--')) {
+        const end = trimmed.indexOf('-->');
+        if (end === -1) break;
+        trimmed = trimmed.slice(end + 3).trim();
+      } else {
+        break;
+      }
+    }
+    if (trimmed.startsWith('<svg')) {
+      if (!/viewBox\s*=/.test(trimmed)) {
+        const wMatch = /width\s*=\s*["']?(\d+\.?\d*)/.exec(trimmed);
+        const hMatch = /height\s*=\s*["']?(\d+\.?\d*)/.exec(trimmed);
+        const w = wMatch ? parseFloat(wMatch[1]) : entity.width;
+        const h = hMatch ? parseFloat(hMatch[1]) : entity.height;
+        return trimmed.replace(/<svg/, `<svg viewBox="0 0 ${w} ${h}"`);
+      }
+      return trimmed;
+    }
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${entity.width} ${entity.height}">${trimmed}</svg>`;
+  }
+
+  getEntityThumbnailUrl(entity: CadEntityInfo): string {
+    if (!entity.svgBase64) return '';
+    let svg = atob(entity.svgBase64);
+    try {
+      svg = removeScadaSymbolMetadata(svg);
+    } catch {
+      svg = this.ensureCompleteSvg(svg, entity);
+    }
+    if (!svg.match(/\swidth=/)) {
+      svg = svg.replace(/<svg/, '<svg width="120" height="120"');
+    }
+    try {
+      const bytes = new TextEncoder().encode(svg);
+      let binary = '';
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return 'data:image/svg+xml;base64,' + btoa(binary);
+    } catch {
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+    }
+  }
+
   private scaleCadToGrid(entity: CadEntityInfo): { col: number; row: number; sizeX: number; sizeY: number } {
+    if (this.previewTransform && entity.previewX !== undefined && entity.previewY !== undefined &&
+        entity.previewWidth !== undefined && entity.previewHeight !== undefined) {
+      const t = this.previewTransform;
+      const targetCols = TARGET_GRID_COLUMNS;
+      const targetRows = Math.max(1, Math.round(targetCols * (t.height / t.width)));
+      const col = Math.floor(((entity.previewX - t.x) / t.width) * targetCols);
+      const row = Math.floor(((entity.previewY - t.y) / t.height) * targetRows);
+      const sizeX = Math.max(1, Math.ceil((entity.previewWidth / t.width) * targetCols));
+      const sizeY = Math.max(1, Math.ceil((entity.previewHeight / t.height) * targetRows));
+      return {
+        col: Math.max(0, Math.min(col, targetCols - sizeX)),
+        row: Math.max(0, Math.min(row, targetRows - sizeY)),
+        sizeX: Math.min(sizeX, targetCols),
+        sizeY: Math.min(sizeY, targetRows)
+      };
+    }
     if (!this.cadBounds) {
       return { col: 0, row: 0, sizeX: 1, sizeY: 1 };
     }
-    const col = Math.floor(((entity.x - this.cadBounds.minX) / this.cadBounds.width) * TARGET_GRID_COLUMNS);
-    const row = Math.floor(((this.cadBounds.maxY - (entity.y + entity.height)) / this.cadBounds.height) * TARGET_GRID_ROWS);
-    const sizeX = Math.max(1, Math.ceil((entity.width / this.cadBounds.width) * TARGET_GRID_COLUMNS));
-    const sizeY = Math.max(1, Math.ceil((entity.height / this.cadBounds.height) * TARGET_GRID_ROWS));
+    const targetCols = TARGET_GRID_COLUMNS;
+    const targetRows = Math.max(1, Math.round(targetCols * (this.cadBounds.height / this.cadBounds.width)));
+    const col = Math.floor(((entity.x - this.cadBounds.minX) / this.cadBounds.width) * targetCols);
+    const row = Math.floor(((this.cadBounds.maxY - (entity.y + entity.height)) / this.cadBounds.height) * targetRows);
+    const sizeX = Math.max(1, Math.ceil((entity.width / this.cadBounds.width) * targetCols));
+    const sizeY = Math.max(1, Math.ceil((entity.height / this.cadBounds.height) * targetRows));
     return {
-      col: Math.max(0, Math.min(col, TARGET_GRID_COLUMNS - sizeX)),
-      row: Math.max(0, Math.min(row, TARGET_GRID_ROWS - sizeY)),
-      sizeX: Math.min(sizeX, TARGET_GRID_COLUMNS),
-      sizeY: Math.min(sizeY, TARGET_GRID_ROWS)
+      col: Math.max(0, Math.min(col, targetCols - sizeX)),
+      row: Math.max(0, Math.min(row, targetRows - sizeY)),
+      sizeX: Math.min(sizeX, targetCols),
+      sizeY: Math.min(sizeY, targetRows)
     };
+  }
+
+  private getScadaSymbolWidgetType(): Observable<WidgetType> {
+    if (!this.scadaSymbolWidgetType$) {
+      this.scadaSymbolWidgetType$ = this.widgetService.getWidgetType(SCADA_SYMBOL_FQN).pipe(
+        shareReplay({ bufferSize: 1, refCount: true })
+      );
+    }
+    return this.scadaSymbolWidgetType$;
+  }
+
+  private scadaSymbolTitle(entity: CadEntityInfo): string {
+    return `CAD ${entity.blockName || entity.type || 'entity'} ${entity.id}`;
+  }
+
+  private scadaSymbolFileName(entity: CadEntityInfo): string {
+    return this.sanitizeScadaSymbolName(this.scadaSymbolTitle(entity)) + '.svg';
+  }
+
+  private sanitizeScadaSymbolName(value: string): string {
+    const sanitized = Array.from(value)
+      .map(char => char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? '_' : char)
+      .join('')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return sanitized || 'CAD entity';
+  }
+
+  private createScadaSymbolContent(entity: CadEntityInfo): string {
+    const rawSvg = entity.svgBase64 ? atob(entity.svgBase64) : '';
+    const svgContent = this.ensureCompleteSvg(rawSvg, entity);
+    const metadata = emptyMetadata(entity.previewWidth || entity.width, entity.previewHeight || entity.height);
+    metadata.title = this.scadaSymbolTitle(entity);
+    metadata.description = `Imported from CAD entity ${entity.id}`;
+    metadata.searchTags = ['cad-import', entity.type].filter(Boolean);
+    return updateScadaSymbolMetadataInContent(svgContent, metadata);
+  }
+
+  private uploadScadaSymbol(entity: CadEntityInfo): Observable<string> {
+    const symbolContent = this.createScadaSymbolContent(entity);
+    const file = new File(
+      [new Blob([symbolContent], { type: 'image/svg+xml' })],
+      this.scadaSymbolFileName(entity),
+      { type: 'image/svg+xml' }
+    );
+    return this.imageService.uploadImage(file, this.scadaSymbolTitle(entity), ResourceSubType.SCADA_SYMBOL).pipe(
+      map(imageInfo => prependTbImagePrefix(imageInfo.link))
+    );
+  }
+
+  private createScadaSymbolWidget(entity: CadEntityInfo, scadaSymbolUrl: string, scadaWidgetType: WidgetType): Widget {
+    const { col, row, sizeX, sizeY } = this.scaleCadToGrid(entity);
+    const defaultConfig = JSON.parse(scadaWidgetType.descriptor.defaultConfig || '{}');
+    const widget: Widget = {
+      id: this.utils.guid(),
+      typeFullFqn: fullWidgetTypeFqn(scadaWidgetType),
+      type: scadaWidgetType.descriptor.type || widgetType.rpc,
+      sizeX,
+      sizeY,
+      row,
+      col,
+      config: mergeDeep({} as any, defaultConfig, {
+        title: this.scadaSymbolTitle(entity),
+        showTitle: false,
+        dropShadow: false,
+        preserveAspectRatio: true,
+        backgroundColor: 'rgba(0,0,0,0)',
+        padding: '0',
+        margin: '0',
+        settings: {
+          ...(defaultConfig.settings || {}),
+          padding: '0',
+          background: colorBackground('rgba(0,0,0,0)'),
+          scadaSymbolUrl,
+          scadaSymbolContent: null,
+          scadaSymbolObjectSettings: {
+            behavior: {},
+            properties: {}
+          }
+        }
+      })
+    };
+    return this.dashboardUtils.prepareWidgetForScadaLayout(widget, true);
   }
 
   private createWidgetForEntity(entity: CadEntityInfo, mapping: WidgetInfo | null): Observable<Widget> {
     const { col, row, sizeX, sizeY } = this.scaleCadToGrid(entity);
 
     if (mapping) {
+      const mappedSizeX = Math.max(sizeX, MIN_MAPPED_WIDGET_SIZE_X);
+      const mappedSizeY = Math.max(sizeY, MIN_MAPPED_WIDGET_SIZE_Y);
       return this.widgetService.getWidgetType(mapping.typeFullFqn).pipe(
         map((widgetType) => {
           const defaultConfig = JSON.parse(widgetType.descriptor.defaultConfig);
           const widget: Widget = {
             id: this.utils.guid(),
             typeFullFqn: mapping.typeFullFqn,
-            type: mapping.type as any,
-            sizeX,
-            sizeY,
+            type: mapping.type,
+            sizeX: mappedSizeX,
+            sizeY: mappedSizeY,
             row,
             col,
-            config: {
-              ...defaultConfig,
+            config: mergeDeep({} as any, defaultConfig, {
               title: mapping.title,
-              showTitle: false,
-              dropShadow: false,
-              preserveAspectRatio: true,
-              backgroundColor: 'rgba(0,0,0,0)',
-              padding: '0',
-              margin: '0'
-            }
+              settings: {
+                ...defaultConfig.settings
+              }
+            })
           };
-          return this.dashboardUtils.prepareWidgetForScadaLayout(widget, true);
+          return widget;
         })
       );
     } else {
-      const svgContent = entity.svgBase64 ? atob(entity.svgBase64) : '';
-      const widget: Widget = {
-        id: this.utils.guid(),
-        typeFullFqn: SCADA_SYMBOL_FQN,
-        type: 'widget' as any,
-        sizeX,
-        sizeY,
-        row,
-        col,
-        config: {
-          title: entity.id,
-          showTitle: false,
-          dropShadow: false,
-          preserveAspectRatio: true,
-          backgroundColor: 'rgba(0,0,0,0)',
-          padding: '0',
-          margin: '0',
-          settings: {
-            scadaSymbolContent: svgContent
-          }
-        } as any
-      };
-      return of(widget);
+      return this.getScadaSymbolWidgetType().pipe(
+        switchMap(scadaWidgetType => this.uploadScadaSymbol(entity).pipe(
+          map(scadaSymbolUrl => this.createScadaSymbolWidget(entity, scadaSymbolUrl, scadaWidgetType))
+        ))
+      );
     }
   }
 
   generateWidgets(): Observable<Widget[]> {
-    const widgetObservables = this.keptEntities.map(entity => {
-      const mapping = this.mappings.get(entity.id) || null;
-      return this.createWidgetForEntity(entity, mapping);
-    });
-    return forkJoin(widgetObservables);
+    const importEntities = this.keptEntities.filter(entity => !this.deletedEntityIds.has(entity.id));
+    this.importTotal = importEntities.length;
+    this.importProgress = 0;
+
+    return from(importEntities).pipe(
+      concatMap(entity => {
+        const mapping = this.mappings.get(entity.id) || null;
+        return this.createWidgetForEntity(entity, mapping).pipe(
+          catchError(err => {
+            console.warn(`Failed to create widget for entity ${entity.id}:`, err);
+            return of(null);
+          }),
+          finalize(() => {
+            this.importProgress++;
+            this.cd.markForCheck();
+          })
+        );
+      }),
+      toArray(),
+      map(widgets => widgets.filter((widget): widget is Widget => !!widget))
+    );
   }
 
   onImportClick(): void {
     this.isLoading = true;
-    this.generateWidgets().subscribe({
+    this.generateWidgets().pipe(
+      finalize(() => {
+        this.isLoading = false;
+        this.importProgress = 0;
+        this.importTotal = 0;
+      })
+    ).subscribe({
       next: (widgets) => {
+        if (widgets.length === 0) {
+          this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
+          return;
+        }
         this.dialogRef.close({
           widgets,
           layoutType: 'scada',
-          targetColumns: TARGET_GRID_COLUMNS
+          targetColumns: TARGET_GRID_COLUMNS,
+          cadAspectRatio: this.previewTransform
+            ? this.previewTransform.height / this.previewTransform.width
+            : (this.cadBounds ? this.cadBounds.height / this.cadBounds.width : undefined)
         });
-      },
-      error: () => {
-        this.isLoading = false;
       }
     });
   }
@@ -443,7 +831,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
   get entityCountWarning(): string | null {
     if (this.result && this.result.manifest.length > 500) {
-      return `Large number of entities (${this.result.manifest.length}). Performance may be affected.`;
+      return this.translate.instant('dashboard.cad-import-dialog.too-many-entities', { count: this.result.manifest.length });
     }
     return null;
   }

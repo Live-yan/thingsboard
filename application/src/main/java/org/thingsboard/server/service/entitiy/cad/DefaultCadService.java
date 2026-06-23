@@ -24,11 +24,13 @@ import org.springframework.stereotype.Service;
 import org.thingsboard.server.common.data.id.TenantId;
 import org.thingsboard.server.config.CadConfig;
 import org.thingsboard.server.queue.util.TbCoreComponent;
+import org.thingsboard.server.service.install.InstallScripts;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -54,12 +56,26 @@ class DefaultCadService implements CadService {
 
     private final CadConfig cadConfig;
     private final ObjectMapper objectMapper;
+    private final InstallScripts installScripts;
+
+    private String resolvedScriptPath;
 
     @PostConstruct
     public void validateEnvironment() {
-        if (!Files.exists(Path.of(cadConfig.getScriptPath()))) {
-            log.warn("CAD Python script not found at: {}", cadConfig.getScriptPath());
+        resolvedScriptPath = resolveScriptPath();
+        if (!Files.exists(Path.of(resolvedScriptPath))) {
+            log.warn("CAD Python script not found at: {}", resolvedScriptPath);
+        } else {
+            log.info("CAD Python script resolved to: {}", resolvedScriptPath);
         }
+    }
+
+    private String resolveScriptPath() {
+        String configured = cadConfig.getScriptPath();
+        if (configured != null && !configured.contains("${pkg.dirname}") && Files.exists(Path.of(configured))) {
+            return configured;
+        }
+        return Paths.get(installScripts.getDataDir(), "scripts", "cad", "dwg_to_svg.py").toString();
     }
 
     @Override
@@ -176,7 +192,7 @@ class DefaultCadService implements CadService {
     private void runPythonConversion(Path inputFile, Path outputDir) throws IOException, InterruptedException {
         List<String> command = List.of(
                 cadConfig.getPythonPath(),
-                cadConfig.getScriptPath(),
+                resolvedScriptPath,
                 inputFile.toString(),
                 "--invert",
                 "-o", outputDir.toString()
@@ -256,14 +272,14 @@ class DefaultCadService implements CadService {
     private void runPythonConversionPerEntity(Path inputFile, Path outputDir) throws IOException, InterruptedException {
         List<String> command = List.of(
                 cadConfig.getPythonPath(),
-                cadConfig.getScriptPath(),
+                resolvedScriptPath,
                 inputFile.toString(),
                 "--per-entity",
                 "--max-entities", String.valueOf(cadConfig.getMaxEntities()),
                 "-o", outputDir.toString()
         );
 
-        log.debug("Running CAD per-entity conversion: {}", String.join(" ", command));
+        log.info("Running CAD per-entity conversion: {}", String.join(" ", command));
 
         Path stderrFile = outputDir.resolve("conversion.stderr");
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -284,7 +300,7 @@ class DefaultCadService implements CadService {
         String stderr = readStderrFile(stderrFile);
         if (process.exitValue() != 0) {
             log.error("Python per-entity conversion failed with exit code {}: {}", process.exitValue(), stderr);
-            throw new RuntimeException("CAD per-entity conversion failed");
+            throw new RuntimeException("CAD per-entity conversion failed (exit code " + process.exitValue() + "): " + stderr);
         }
     }
 
@@ -298,9 +314,44 @@ class DefaultCadService implements CadService {
 
         Path manifestFile = outputDir.resolve("manifest.json");
         List<CadEntityInfo> entities = new ArrayList<>();
+        CadPerEntityResult.ModelspaceBounds msBounds = null;
+        CadPerEntityResult.PreviewTransform previewTransform = null;
         if (Files.exists(manifestFile)) {
             String manifestJson = Files.readString(manifestFile, StandardCharsets.UTF_8);
-            List<Map<String, Object>> manifestList = objectMapper.readValue(manifestJson, new TypeReference<>() {});
+            List<Map<String, Object>> manifestList;
+            try {
+                Map<String, Object> manifestObj = objectMapper.readValue(manifestJson, new TypeReference<Map<String, Object>>() {});
+                Object entitiesField = manifestObj.get("entities");
+                if (entitiesField instanceof List) {
+                    manifestList = (List<Map<String, Object>>) entitiesField;
+                } else {
+                    log.warn("manifest.json 'entities' field is missing or not an array; got: {}", entitiesField);
+                    manifestList = List.of();
+                }
+                Object msBoundsField = manifestObj.get("modelspaceBounds");
+                if (msBoundsField instanceof Map) {
+                    Map<String, Object> b = (Map<String, Object>) msBoundsField;
+                    msBounds = new CadPerEntityResult.ModelspaceBounds(
+                            toDouble(b.get("minX")), toDouble(b.get("maxX")),
+                            toDouble(b.get("minY")), toDouble(b.get("maxY"))
+                    );
+                }
+                Object transformField = manifestObj.get("previewViewBox");
+                if (transformField instanceof Map) {
+                    Map<String, Object> t = (Map<String, Object>) transformField;
+                    previewTransform = new CadPerEntityResult.PreviewTransform(
+                            toDouble(t.get("x")), toDouble(t.get("y")),
+                            toDouble(t.get("width")), toDouble(t.get("height")),
+                            toDouble(manifestObj.get("scale")),
+                            toDouble(manifestObj.get("translateX")),
+                            toDouble(manifestObj.get("translateY")),
+                            manifestObj.get("yFlip") instanceof Boolean ? (Boolean) manifestObj.get("yFlip") : true
+                    );
+                }
+            } catch (ClassCastException e) {
+                log.warn("Unexpected manifest.json structure, trying legacy array format", e);
+                manifestList = objectMapper.readValue(manifestJson, new TypeReference<List<Map<String, Object>>>() {});
+            }
 
             int maxEntities = cadConfig.getMaxEntities();
             int count = 0;
@@ -315,7 +366,11 @@ class DefaultCadService implements CadService {
                     continue;
                 }
 
-                Path svgPath = outputDir.resolve(svgFile);
+                Path svgPath = outputDir.resolve(svgFile).normalize();
+                if (!svgPath.startsWith(outputDir)) {
+                    log.warn("Path traversal attempt in manifest entry, skipping: {}", svgFile);
+                    continue;
+                }
                 if (!Files.exists(svgPath)) {
                     log.warn("Entity SVG file not found: {}", svgPath);
                     continue;
@@ -336,13 +391,18 @@ class DefaultCadService implements CadService {
                 double width = toDouble(entry.get("width"));
                 double height = toDouble(entry.get("height"));
                 String blockName = entry.get("blockName") != null ? String.valueOf(entry.get("blockName")) : null;
+                double previewX = entry.containsKey("previewX") ? toDouble(entry.get("previewX")) : x;
+                double previewY = entry.containsKey("previewY") ? toDouble(entry.get("previewY")) : y;
+                double previewWidth = entry.containsKey("previewWidth") ? toDouble(entry.get("previewWidth")) : width;
+                double previewHeight = entry.containsKey("previewHeight") ? toDouble(entry.get("previewHeight")) : height;
 
-                entities.add(new CadEntityInfo(id, type, svgBase64, x, y, width, height, blockName));
+                entities.add(new CadEntityInfo(id, type, svgBase64, x, y, width, height, blockName,
+                        previewX, previewY, previewWidth, previewHeight));
                 count++;
             }
         }
 
-        return new CadPerEntityResult(previewBase64, entities);
+        return new CadPerEntityResult(previewBase64, entities, msBounds, previewTransform);
     }
 
     private double toDouble(Object value) {

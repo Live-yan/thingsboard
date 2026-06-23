@@ -209,18 +209,39 @@ export class ImportExportService {
       const input = this.document.createElement('input');
       input.type = 'file';
       input.accept = '.dwg,.dxf';
+      let fileSelected = false;
+      let completed = false;
+      const completeWithoutFile = () => {
+        if (!completed && !fileSelected && !input.files?.length) {
+          completed = true;
+          subscriber.next(null as any);
+          subscriber.complete();
+        }
+      };
       input.onchange = () => {
+        if (completed) {
+          return;
+        }
         const file = input.files?.[0];
-        if (!file) { subscriber.complete(); return; }
+        if (!file) { completeWithoutFile(); return; }
+        fileSelected = true;
         const formData = new FormData();
         formData.append('file', file, file.name);
         this.http.post<CadPerEntityResult>('/api/cad/convert-per-entity', formData,
           defaultHttpUploadOptions(false, false, false)).subscribe({
-            next: result => { subscriber.next(result); subscriber.complete(); },
+            next: result => {
+              completed = true;
+              subscriber.next(result);
+              subscriber.complete();
+            },
             error: err => subscriber.error(err)
           });
       };
       input.click();
+      this.document.defaultView?.setTimeout(() => {
+        const onFocus = () => this.document.defaultView?.setTimeout(completeWithoutFile, 300);
+        this.document.defaultView?.addEventListener('focus', onFocus, { once: true });
+      }, 0);
     }).pipe(catchError(() => of(null)));
   }
 

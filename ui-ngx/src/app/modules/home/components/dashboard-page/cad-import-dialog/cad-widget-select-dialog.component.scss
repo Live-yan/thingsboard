@@ -13,28 +13,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.thingsboard.server.service.entitiy.cad;
+@import '../../../../../../scss/constants';
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+:host {
+  display: block;
+}
 
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class CadEntityInfo {
+.mat-mdc-dialog-content.mat-dialog-content-flex {
+  padding: 0;
+  position: relative;
+}
 
-    private String id;
-    private String type;
-    private String svgBase64;
-    private double x;
-    private double y;
-    private double width;
-    private double height;
-    private String blockName;
-    private double previewX;
-    private double previewY;
-    private double previewWidth;
-    private double previewHeight;
-
+@media #{$mat-gt-xs} {
+  :host {
+    width: 900px;
+  }
+  .mat-mdc-dialog-content.mat-dialog-content-flex {
+    height: 700px;
+  }
 }

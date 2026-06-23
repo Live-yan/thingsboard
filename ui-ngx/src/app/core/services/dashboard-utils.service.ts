@@ -702,7 +702,8 @@ export class DashboardUtilsService {
                            originalSize?: WidgetSize,
                            row?: number,
                            column?: number,
-                           breakpoint = 'default'): void {
+                           breakpoint = 'default',
+                           skipCollisionCheck = false): void {
     const dashboardConfiguration = dashboard.configuration;
     const states = dashboardConfiguration.states;
     const state = states[targetState];
@@ -745,7 +746,7 @@ export class DashboardUtilsService {
     if (row > -1 && column > - 1) {
       widgetLayout.row = row;
       widgetLayout.col = column;
-      if (this.hasWidgetCollision(widgetLayout.row, widgetLayout.col,
+      if (!skipCollisionCheck && this.hasWidgetCollision(widgetLayout.row, widgetLayout.col,
                                   widgetLayout.sizeX, widgetLayout.sizeY, Object.values(layout.widgets))) {
         this.widgetPossiblePosition(widgetLayout, layout);
       }

@@ -1291,7 +1291,7 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
       {
         disableClose: true,
         panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
-        data: { dashboard: this.dashboard }
+        data: { dashboard: this.dashboard, autoUpload: true }
       }
     ).afterClosed().subscribe((result) => {
       if (!result || !result.widgets?.length) {
@@ -1305,11 +1305,14 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
       layout.gridSettings.margin = 0;
       layout.gridSettings.outerMargin = false;
       layout.gridSettings.autoFillHeight = false;
+      if (result.cadAspectRatio) {
+        layout.gridSettings.rowHeight = Math.round(50 * result.cadAspectRatio);
+      }
       for (const widget of result.widgets) {
         this.dashboardUtils.addWidgetToLayout(
           this.dashboard, stateId, 'main', widget,
           result.targetColumns, { sizeX: widget.sizeX, sizeY: widget.sizeY } as any,
-          widget.row, widget.col
+          widget.row, widget.col, 'default', true
         );
         this.layouts.main.layoutCtx.widgets.addWidgetId(widget.id);
       }

@@ -261,6 +261,7 @@ export class DashboardLayoutComponent extends PageComponent implements ILayoutCo
     this.dashboard.pauseChangeNotifications();
     setTimeout(() => {
        this.dashboard.resumeChangeNotifications();
+       this.dashboard.notifyGridsterOptionsChanged();
        this.dashboard.notifyLayoutUpdated();
     }, 0);
   }

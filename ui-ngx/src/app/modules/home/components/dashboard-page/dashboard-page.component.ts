@@ -46,6 +46,7 @@ import {
   BreakpointInfo,
   Dashboard,
   DashboardConfiguration,
+  DashboardLayout,
   DashboardLayoutId,
   DashboardLayoutInfo,
   DashboardLayoutsInfo,
@@ -136,6 +137,10 @@ import {
 } from '@home/components/dashboard-page/widget-types-panel.component';
 import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
 import { CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dialog.component';
+import {
+  applyCadImportGridSettings,
+  syncCadImportLayoutContext
+} from '@home/components/dashboard-page/cad-import-dialog/cad-import-dashboard-layout';
 import { MobileService } from '@core/services/mobile.service';
 
 import {
@@ -1299,25 +1304,29 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
       }
       const stateId = this.dashboardCtx.state;
       const layout = this.dashboard.configuration.states[stateId].layouts.main;
-      layout.gridSettings = layout.gridSettings || {};
-      layout.gridSettings.layoutType = LayoutType.scada;
-      layout.gridSettings.columns = result.targetColumns;
-      layout.gridSettings.margin = 0;
-      layout.gridSettings.outerMargin = false;
-      layout.gridSettings.autoFillHeight = false;
-      if (result.cadAspectRatio) {
-        layout.gridSettings.rowHeight = Math.round(50 * result.cadAspectRatio);
-      }
+      applyCadImportGridSettings(layout, result);
       for (const widget of result.widgets) {
         this.dashboardUtils.addWidgetToLayout(
           this.dashboard, stateId, 'main', widget,
           result.targetColumns, { sizeX: widget.sizeX, sizeY: widget.sizeY } as any,
           widget.row, widget.col, 'default', true
         );
-        this.layouts.main.layoutCtx.widgets.addWidgetId(widget.id);
       }
-      this.runChangeDetection();
+      this.refreshCadImportLayout(layout);
+      this.scheduleCadImportLayoutRefresh(layout);
     });
+  }
+
+  private refreshCadImportLayout(layout: DashboardLayout) {
+    syncCadImportLayoutContext(this.layouts.main.layoutCtx, layout);
+    this.updateLayoutSizes();
+    this.runChangeDetection();
+  }
+
+  private scheduleCadImportLayoutRefresh(layout: DashboardLayout) {
+    const refresh = () => this.ngZone.run(() => this.refreshCadImportLayout(layout));
+    this.window.requestAnimationFrame(refresh);
+    this.window.setTimeout(refresh, 100);
   }
 
   onAddWidgetClosed() {

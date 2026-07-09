@@ -80,6 +80,7 @@ import {
   WidgetConfig,
   WidgetInfo,
   WidgetPosition,
+  WidgetSize,
   widgetType,
   widgetTypesData
 } from '@shared/models/widget.models';
@@ -1291,29 +1292,40 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
     if ($event) {
       $event.stopPropagation();
     }
-    this.dialog.open<CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult>(
-      CadImportDialogComponent,
-      {
-        disableClose: true,
-        panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
-        data: { dashboard: this.dashboard, autoUpload: true }
-      }
-    ).afterClosed().subscribe((result) => {
-      if (!result || !result.widgets?.length) {
+    this.importExport.importCadFilePerEntity().subscribe((cadResult) => {
+      if (!cadResult) {
         return;
       }
-      const stateId = this.dashboardCtx.state;
-      const layout = this.dashboard.configuration.states[stateId].layouts.main;
-      applyCadImportGridSettings(layout, result);
-      for (const widget of result.widgets) {
-        this.dashboardUtils.addWidgetToLayout(
-          this.dashboard, stateId, 'main', widget,
-          result.targetColumns, { sizeX: widget.sizeX, sizeY: widget.sizeY } as any,
-          widget.row, widget.col, 'default', true
-        );
-      }
-      this.refreshCadImportLayout(layout);
-      this.scheduleCadImportLayoutRefresh(layout);
+      this.dialog.open<CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult>(
+        CadImportDialogComponent,
+        {
+          disableClose: true,
+          panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
+          data: { dashboard: this.dashboard, result: cadResult }
+        }
+      ).afterClosed().subscribe((result) => {
+        if (!result || !result.widgets?.length) {
+          return;
+        }
+        const stateId = this.dashboardCtx.state;
+        const layout = this.dashboard.configuration.states[stateId].layouts.main;
+        applyCadImportGridSettings(layout, result);
+        for (const widget of result.widgets) {
+          const originalSize: WidgetSize = {
+            sizeX: widget.sizeX,
+            sizeY: widget.sizeY,
+            preserveAspectRatio: widget.config.preserveAspectRatio,
+            resizable: widget.config.resizable
+          };
+          this.dashboardUtils.addWidgetToLayout(
+            this.dashboard, stateId, 'main', widget,
+            result.targetColumns, originalSize,
+            widget.row, widget.col, 'default', true
+          );
+        }
+        this.refreshCadImportLayout(layout);
+        this.scheduleCadImportLayoutRefresh(layout);
+      });
     });
   }
 

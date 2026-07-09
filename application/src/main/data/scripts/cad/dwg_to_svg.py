@@ -392,6 +392,88 @@ def _make_thin_strokes_visible(svg_str: str, min_width: float) -> str:
     return svg_str
 
 
+def _add_non_scaling_stroke_effect(svg_str: str) -> str:
+    """Keep CAD entity strokes stable when the dashboard uses native SVG scaling."""
+    graphics_tags = r'(?:path|line|polyline|polygon|circle|ellipse|rect)'
+
+    def replace_tag(match: re.Match) -> str:
+        tag = match.group(1)
+        attrs = match.group(2)
+        if re.search(r'\bvector-effect\s*=', attrs):
+            return match.group(0)
+        return f'<{tag} vector-effect="non-scaling-stroke"{attrs}>'
+
+    return re.sub(
+        rf'<({graphics_tags})\b([^>]*)>',
+        replace_tag,
+        svg_str,
+        flags=re.IGNORECASE,
+    )
+
+
+def _dashboard_entity_stroke_px(stroke_width: float,
+                                entity_viewbox: tuple[float, float, float, float],
+                                visual_bbox: tuple[float, float, float, float],
+                                preview_viewbox: tuple[float, float, float, float]) -> float:
+    """Convert compact entity stroke units to preview-equivalent CSS pixels."""
+    _, _, vb_w, vb_h = entity_viewbox
+    visual_min_x, visual_min_y, visual_max_x, visual_max_y = visual_bbox
+    visual_w = max(visual_max_x - visual_min_x, 0.0)
+    visual_h = max(visual_max_y - visual_min_y, 0.0)
+    scale_x = visual_w / max(vb_w, 1.0)
+    scale_y = visual_h / max(vb_h, 1.0)
+    if scale_x > 0 and scale_y > 0:
+        preview_stroke_units = stroke_width * ((scale_x * scale_y) ** 0.5)
+    else:
+        preview_stroke_units = stroke_width * max(scale_x, scale_y, 1.0)
+    _, _, preview_w, preview_h = preview_viewbox
+    preview_units_per_px = max(
+        preview_w / max(PREVIEW_DISPLAY_WIDTH, 1),
+        preview_h / max(PREVIEW_DISPLAY_HEIGHT, 1),
+        1.0,
+    )
+    stroke_px = preview_stroke_units / preview_units_per_px
+    return max(PREVIEW_MIN_STROKE_PX, stroke_px)
+
+
+def _normalize_dashboard_entity_strokes(svg_str: str,
+                                        entity_viewbox: tuple[float, float, float, float],
+                                        visual_bbox: tuple[float, float, float, float],
+                                        preview_viewbox: tuple[float, float, float, float]) -> str:
+    """Normalize CAD entity strokes for the SCADA widget's dashboard rendering path."""
+
+    def fmt(value: float) -> str:
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    def replace_css_width(match: re.Match) -> str:
+        prefix, value = match.group(1), match.group(2)
+        try:
+            width = float(value)
+        except ValueError:
+            return match.group(0)
+        return f"{prefix}{fmt(_dashboard_entity_stroke_px(width, entity_viewbox, visual_bbox, preview_viewbox))}"
+
+    def replace_attr_width(match: re.Match) -> str:
+        prefix, quote, value = match.group(1), match.group(2), match.group(3)
+        try:
+            width = float(value)
+        except ValueError:
+            return match.group(0)
+        return f"{prefix}{quote}{fmt(_dashboard_entity_stroke_px(width, entity_viewbox, visual_bbox, preview_viewbox))}{quote}"
+
+    svg_str = re.sub(
+        r'(stroke-width\s*:\s*)([0-9]*\.?[0-9]+)(?=\s*[;}])',
+        replace_css_width,
+        svg_str,
+    )
+    svg_str = re.sub(
+        r'(stroke-width=)(["\'])([0-9]*\.?[0-9]+)\2',
+        replace_attr_width,
+        svg_str,
+    )
+    return _add_non_scaling_stroke_effect(svg_str)
+
+
 def _preview_min_stroke_width(viewbox: tuple[float, float, float, float] | None,
                               target_width_px: int = PREVIEW_DISPLAY_WIDTH,
                               target_height_px: int = PREVIEW_DISPLAY_HEIGHT) -> float:
@@ -479,28 +561,59 @@ def _entity_preview_hitbox(entity_id: str,
     )
 
 
-def _global_entity_svg(full_preview_inner: str,
-                       entity_id: str,
-                       preview_bbox: tuple[float, float, float, float],
-                       preview_viewbox: tuple[float, float, float, float]) -> str:
-    """Build a dashboard entity SVG that keeps the same coordinate system as preview.svg."""
-    min_x, min_y, max_x, max_y = preview_bbox
-    vb_x, vb_y, vb_w, vb_h = preview_viewbox
-    clip_id = f"cad_clip_{entity_id}"
+def _expand_degenerate_preview_bbox(bbox: tuple[float, float, float, float],
+                                    min_size: float) -> tuple[float, float, float, float]:
+    min_x, min_y, max_x, max_y = bbox
     width = max_x - min_x
     height = max_y - min_y
+    if width <= 0:
+        cx = (min_x + max_x) / 2
+        min_x = cx - min_size / 2
+        max_x = cx + min_size / 2
+    if height <= 0:
+        cy = (min_y + max_y) / 2
+        min_y = cy - min_size / 2
+        max_y = cy + min_size / 2
+    return min_x, min_y, max_x, max_y
+
+
+def _global_entity_svg(entity_svg: str,
+                       entity_id: str,
+                       layout_bbox: tuple[float, float, float, float],
+                       visual_bbox: tuple[float, float, float, float],
+                       preview_viewbox: tuple[float, float, float, float]) -> str:
+    """Build a compact dashboard entity SVG that uses preview coordinates.
+
+    The root viewBox follows the expanded layout bbox so SCADA widget scaling
+    matches dashboard placement, while the nested entity SVG uses the real preview
+    geometry bbox so very short lines are not stretched to the hitbox width.
+    """
+    layout_min_x, layout_min_y, layout_max_x, layout_max_y = layout_bbox
+    layout_width = layout_max_x - layout_min_x
+    layout_height = layout_max_y - layout_min_y
+    visual_min_x, visual_min_y, visual_max_x, visual_max_y = _expand_degenerate_preview_bbox(
+        visual_bbox, _preview_min_stroke_width(preview_viewbox)
+    )
+    visual_width = visual_max_x - visual_min_x
+    visual_height = visual_max_y - visual_min_y
+    compact_svg = _resize_svg(entity_svg, BLOCK_WIDTH, padding_pct=0.0, transparent_bg=True, invert_colors=True)
+    entity_viewbox = _extract_svg_viewbox(compact_svg) or (0, 0, max(layout_width, 1.0), max(layout_height, 1.0))
+    compact_svg = _normalize_dashboard_entity_strokes(
+        compact_svg, entity_viewbox,
+        (visual_min_x, visual_min_y, visual_max_x, visual_max_y),
+        preview_viewbox
+    )
+    vb_x, vb_y, vb_w, vb_h = entity_viewbox
+    entity_inner = _svg_inner_content(compact_svg)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="{min_x} {min_y} {width} {height}" '
+        f'viewBox="{layout_min_x} {layout_min_y} {layout_width} {layout_height}" '
+        f'width="{layout_width}" height="{layout_height}" '
         f'data-cad-global-entity="true" data-cad-entity-id="{entity_id}">'
-        f'<defs><clipPath id="{clip_id}">'
-        f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}"/>'
-        f'</clipPath></defs>'
-        f'<g clip-path="url(#{clip_id})">'
-        f'<svg x="{vb_x}" y="{vb_y}" width="{vb_w}" height="{vb_h}" '
+        f'<svg x="{visual_min_x}" y="{visual_min_y}" width="{visual_width}" height="{visual_height}" '
         f'viewBox="{vb_x} {vb_y} {vb_w} {vb_h}" preserveAspectRatio="none">'
-        f'{full_preview_inner}'
-        f'</svg></g></svg>'
+        f'{entity_inner}'
+        f'</svg></svg>'
     )
 
 
@@ -1075,11 +1188,15 @@ def dxf_to_per_entity_svgs(dxf_path: Path, output_folder: Path,
 
     entity_hitboxes = []
     preview_bboxes = {}
+    preview_visual_bboxes = {}
     for eid, esvg, ebb in preview_entity_svgs:
         ex_min, ey_min, ex_max, ey_max = _cad_bbox_to_svg_bbox(
             ebb, ms_bounds, full_preview_viewbox, svg_edge_pad
         )
         preview_bboxes[eid] = (ex_min, ey_min, ex_max, ey_max)
+        preview_visual_bboxes[eid] = _cad_bbox_to_svg_bbox(
+            ebb, ms_bounds, full_preview_viewbox, 0.0
+        )
         group = _entity_preview_hitbox(
             eid, ex_min, ey_min, ex_max, ey_max, svg_edge_pad
         )
@@ -1100,7 +1217,9 @@ def dxf_to_per_entity_svgs(dxf_path: Path, output_folder: Path,
     for entity_id, entity_svg, bb, entity_title in entity_outputs:
         if entity_id in preview_bboxes:
             entity_svg = _global_entity_svg(
-                full_preview_inner, entity_id, preview_bboxes[entity_id], full_preview_viewbox
+                entity_svg, entity_id, preview_bboxes[entity_id],
+                preview_visual_bboxes.get(entity_id, preview_bboxes[entity_id]),
+                full_preview_viewbox
             )
         else:
             entity_svg = _resize_svg(entity_svg, BLOCK_WIDTH, transparent_bg=True, invert_colors=True)

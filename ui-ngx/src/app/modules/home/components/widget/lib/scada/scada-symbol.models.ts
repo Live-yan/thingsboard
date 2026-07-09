@@ -80,6 +80,7 @@ import {
 } from '@shared/models/dynamic-form.models';
 import { TbUnit } from '@shared/models/unit.models';
 import { isFiniteSvgViewBox, svgViewBoxAttribute } from '@home/components/widget/lib/scada/scada-svg-viewbox';
+import { useNativeScadaSymbolScaling } from '@home/components/widget/lib/scada/scada-symbol-sizing';
 
 export interface ScadaSymbolApi {
   generateElementId: () => string;
@@ -485,6 +486,7 @@ export const defaultScadaSymbolObjectSettings = (metadata: ScadaSymbolMetadata):
 export type ScadaSymbolObjectSettings = {
   behavior: {[id: string]: any};
   properties: {[id: string]: any};
+  stretchToFit?: boolean;
 };
 
 const parseError = (ctx: WidgetContext, err: any): string =>
@@ -521,6 +523,7 @@ export class ScadaSymbolObject {
   private scale = 1;
 
   private performInit = true;
+  private nativeSvgScaling = false;
 
   constructor(private rootElement: HTMLElement,
               private ctx: WidgetContext,
@@ -585,6 +588,10 @@ export class ScadaSymbolObject {
   }
 
   private prepareSvgShape(doc: XMLDocument) {
+    this.nativeSvgScaling = useNativeScadaSymbolScaling(
+      doc.documentElement.getAttribute('data-cad-global-entity') === 'true',
+      this.settings.stretchToFit === true
+    );
     const elements = doc.getElementsByTagName('tb:metadata');
     for (let i=0;i<elements.length;i++) {
       elements.item(i).remove();
@@ -621,7 +628,13 @@ export class ScadaSymbolObject {
     if (isFiniteSvgViewBox(this.box)) {
       this.svgShape.attr('viewBox', svgViewBoxAttribute(this.box));
     }
-    this.svgShape.size(this.box.width, this.box.height);
+    if (this.nativeSvgScaling) {
+      this.svgShape.size('100%', '100%');
+      this.svgShape.attr('preserveAspectRatio', 'none');
+      this.svgShape.node.style.inset = '0';
+    } else {
+      this.svgShape.size(this.box.width, this.box.height);
+    }
     this.svgShape.addTo(this.rootElement);
   }
 
@@ -792,6 +805,14 @@ export class ScadaSymbolObject {
 
   private resize() {
     if (this.svgShape) {
+      if (this.nativeSvgScaling) {
+        this.svgShape.node.style.transform = 'none';
+        if (this.performInit) {
+          this.performInit = false;
+          this.init();
+        }
+        return;
+      }
       const targetWidth = this.rootElement.getBoundingClientRect().width;
       const targetHeight = this.rootElement.getBoundingClientRect().height;
       if (targetWidth && targetHeight) {

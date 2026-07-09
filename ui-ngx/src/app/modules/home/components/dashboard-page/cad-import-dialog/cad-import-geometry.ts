@@ -5,6 +5,16 @@ export interface CadRect {
   height: number;
 }
 
+export interface CadPoint {
+  x: number;
+  y: number;
+}
+
+export interface CadScreenOrigin {
+  left: number;
+  top: number;
+}
+
 export interface CadPreviewTransform {
   x: number;
   y: number;
@@ -25,6 +35,76 @@ const SELECTION_PADDING_PX = 4;
 
 const finiteOrFallback = (value: number, fallback: number): number =>
   Number.isFinite(value) ? value : fallback;
+
+const normalizedZoom = (zoomLevel: number): number =>
+  Math.max(finiteOrFallback(zoomLevel, 1), 0.1);
+
+export const buildPreviewCssTransform = (
+  zoomLevel: number,
+  panX: number,
+  panY: number
+): string => {
+  const zoom = normalizedZoom(zoomLevel);
+  const x = finiteOrFallback(panX, 0);
+  const y = finiteOrFallback(panY, 0);
+  return `scale(${zoom}) translate(${x}px, ${y}px)`;
+};
+
+export const screenPointToPreviewViewportCoords = (
+  clientX: number,
+  clientY: number,
+  origin: CadScreenOrigin,
+  zoomLevel: number,
+  panX: number,
+  panY: number
+): CadPoint => {
+  const zoom = normalizedZoom(zoomLevel);
+  return {
+    x: (clientX - origin.left) / zoom - finiteOrFallback(panX, 0),
+    y: (clientY - origin.top) / zoom - finiteOrFallback(panY, 0)
+  };
+};
+
+export const previewViewportPointToSvgCoords = (
+  point: CadPoint,
+  previewTransform: CadPreviewTransform | null | undefined,
+  viewportWidth: number,
+  viewportHeight: number
+): CadPoint => {
+  if (!previewTransform) {
+    return point;
+  }
+  const viewWidth = Math.max(finiteOrFallback(viewportWidth, 1), 1);
+  const viewHeight = Math.max(finiteOrFallback(viewportHeight, 1), 1);
+  const boxWidth = Math.max(finiteOrFallback(previewTransform.width, viewWidth), 1);
+  const boxHeight = Math.max(finiteOrFallback(previewTransform.height, viewHeight), 1);
+  const scale = Math.min(viewWidth / boxWidth, viewHeight / boxHeight);
+  const renderedWidth = boxWidth * scale;
+  const renderedHeight = boxHeight * scale;
+  const offsetX = (viewWidth - renderedWidth) / 2;
+  const offsetY = (viewHeight - renderedHeight) / 2;
+  return {
+    x: previewTransform.x + (point.x - offsetX) / scale,
+    y: previewTransform.y + (point.y - offsetY) / scale
+  };
+};
+
+export const screenPointToPreviewSvgCoords = (
+  clientX: number,
+  clientY: number,
+  origin: CadScreenOrigin,
+  zoomLevel: number,
+  panX: number,
+  panY: number,
+  previewTransform: CadPreviewTransform | null | undefined,
+  viewportWidth: number,
+  viewportHeight: number
+): CadPoint => previewViewportPointToSvgCoords(
+  screenPointToPreviewViewportCoords(clientX, clientY, origin, zoomLevel, panX, panY),
+  previewTransform,
+  viewportWidth,
+  viewportHeight
+);
 
 export const viewBoxUnitsForScreenPixels = (
   previewTransform: CadPreviewTransform | null | undefined,

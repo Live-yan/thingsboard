@@ -74,6 +74,10 @@
           <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="keepSelected()">
             {{ 'dashboard.cad-import-dialog.keep-selected' | translate }}
           </button>
+          <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size < 2" (click)="mapSelectedGroup()">
+            <mat-icon>join_inner</mat-icon>
+            {{ 'dashboard.cad-import-dialog.group-map-selected' | translate }}
+          </button>
           <span class="flex-1"></span>
           <div class="zoom-controls">
             <button mat-icon-button (click)="zoomOut()" matTooltip="Zoom out">
@@ -103,7 +107,24 @@
       <div class="map-step">
         <p class="map-hint">{{ 'dashboard.cad-import-dialog.map-hint' | translate }}</p>
         <div class="entity-list">
-          @for (entity of keptEntities; track entity.id) {
+          @for (group of mappedGroups; track group.id) {
+            <div class="entity-row mapped">
+              <div class="entity-thumbnail">
+                <mat-icon>join_inner</mat-icon>
+              </div>
+              <div class="entity-info">
+                <span class="entity-id">{{ 'dashboard.cad-import-dialog.group-entity-count' | translate: { count: group.entityIds.length } }}</span>
+                <span class="entity-type">{{ 'dashboard.cad-import-dialog.group-type' | translate }}</span>
+              </div>
+              <div class="entity-mapping">
+                <span class="mapped-widget">{{ group.widgetInfo.title }}</span>
+                <button mat-icon-button color="warn" (click)="removeGroupMapping(group)">
+                  <mat-icon>link_off</mat-icon>
+                </button>
+              </div>
+            </div>
+          }
+          @for (entity of mapStepEntities; track entity.id) {
             <div class="entity-row" [class.mapped]="mappings.get(entity.id)">
               <div class="entity-thumbnail">
                  @if (entity.svgBase64) {
@@ -170,8 +191,11 @@
   }
   <button mat-button (click)="dialogRef.close(null)">{{ 'dashboard.cad-import-dialog.cancel' | translate }}</button>
   @if (step !== 'review') {
-    <button mat-raised-button color="primary" [disabled]="!canProceed()" (click)="goNext()">
-      {{ 'dashboard.cad-import-dialog.next' | translate }}
+    <button mat-raised-button color="primary" [disabled]="isLoading || !canProceed()" (click)="goNext()">
+      @if (isLoading && step === 'map') {
+        <mat-spinner diameter="20"></mat-spinner>
+      }
+      {{ (step === 'map' ? 'dashboard.cad-import-dialog.import-button' : 'dashboard.cad-import-dialog.next') | translate }}
     </button>
   } @else {
     <button mat-raised-button color="primary" [disabled]="isLoading" (click)="onImportClick()">

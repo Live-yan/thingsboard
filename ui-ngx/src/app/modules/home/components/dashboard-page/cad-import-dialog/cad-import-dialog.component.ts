@@ -28,7 +28,7 @@ import { DashboardUtilsService } from '@core/services/dashboard-utils.service';
 import { CadWidgetSelectDialogComponent } from './cad-widget-select-dialog.component';
 import { SVG, Svg, G, Rect } from '@svgdotjs/svg.js';
 import { from, Observable, of } from 'rxjs';
-import { catchError, concatMap, finalize, map, shareReplay, switchMap, toArray } from 'rxjs/operators';
+import { catchError, finalize, map, mergeMap, shareReplay, switchMap, toArray } from 'rxjs/operators';
 import { UtilsService } from '@core/services/utils.service';
 import { TranslateService } from '@ngx-translate/core';
 import { ImageService } from '@core/http/image.service';
@@ -39,12 +39,26 @@ import {
 } from '@home/components/widget/lib/scada/scada-symbol.models';
 import { mergeDeep } from '@core/utils';
 import { ResourceSubType, prependTbImagePrefix } from '@shared/models/resource.models';
-import { colorBackground } from '@shared/models/widget-settings.models';
-import { buildSelectionHighlight } from './cad-import-geometry';
+import {
+  buildPreviewCssTransform,
+  buildSelectionHighlight,
+  CadRect,
+  screenPointToPreviewSvgCoords
+} from './cad-import-geometry';
+import {
+  buildCadImportWidgetItems,
+  CadImportGroupMapping,
+  CadImportWidgetEntity,
+  cadImportWidgetPlan,
+  cadMappedScadaWidgetConfigDefaults,
+  expandCadGridBounds
+} from './cad-import-widget-generation';
+import { buildDeletedPreviewMask } from './cad-import-preview-visibility';
 
 export interface CadImportDialogData {
   dashboard: any;
   autoUpload?: boolean;
+  result?: CadPerEntityResult;
 }
 
 export interface CadImportDashboardResult {
@@ -54,13 +68,16 @@ export interface CadImportDashboardResult {
   cadAspectRatio?: number;
 }
 
+type CadImportStep = 'upload' | 'preview' | 'map' | 'review';
+type CadEntityGroupMapping = CadImportGroupMapping<WidgetInfo>;
+
 const VIEWPORT_WIDTH = 1200;
 const VIEWPORT_HEIGHT = 700;
 const TARGET_GRID_COLUMNS = 1000;
-const TARGET_GRID_ROWS = 1000;
-const MIN_MAPPED_WIDGET_SIZE_X = 24;
-const MIN_MAPPED_WIDGET_SIZE_Y = 16;
+const MIN_CAD_VISUAL_WIDGET_SIZE_X = 4;
+const MIN_CAD_VISUAL_WIDGET_SIZE_Y = 4;
 const SCADA_SYMBOL_FQN = 'system.scada_symbol';
+const CAD_IMPORT_WIDGET_CONCURRENCY = 8;
 
 @Component({
   selector: 'tb-cad-import-dialog',
@@ -72,7 +89,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
   @ViewChild('previewCanvas') previewCanvasRef!: ElementRef<HTMLDivElement>;
 
-  step: 'upload' | 'preview' | 'map' | 'review' = 'upload';
+  step: CadImportStep = 'upload';
   previewMode: 'select' | 'map' = 'select';
   isLoading = false;
   importProgress = 0;
@@ -80,6 +97,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   result: CadPerEntityResult | null = null;
   keptEntities: CadEntityInfo[] = [];
   mappings: Map<string, WidgetInfo | null> = new Map<string, WidgetInfo | null>();
+  groupMappings: CadEntityGroupMapping[] = [];
   selectedEntityIds: Set<string> = new Set<string>();
   deletedEntityIds: Set<string> = new Set<string>();
   errorMessage = '';
@@ -91,6 +109,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private entityGroups: Map<string, G> = new Map<string, G>();
   private selectionHighlights: Map<string, Rect> = new Map<string, Rect>();
   private highlightLayer: G | null = null;
+  private deletedMaskLayer: G | null = null;
+  private deletedMasks: Map<string, Rect> = new Map<string, Rect>();
   private previewRendered = false;
   private isDragging = false;
   private selectionRect: any = null;
@@ -123,7 +143,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   ngOnInit(): void {
-    if (this.data.autoUpload) {
+    if (this.data.result) {
+      this.applyConversionResult(this.data.result);
+    } else if (this.data.autoUpload) {
       this.onUploadClick();
     }
   }
@@ -143,35 +165,42 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     this.errorMessage = '';
     this.importExport.importCadFilePerEntity().subscribe({
       next: (result) => {
+        this.isLoading = false;
         if (!result) {
-          this.isLoading = false;
           if (this.data.autoUpload) {
             this.dialogRef.close(null);
           }
           return;
         }
-        if (result.manifest.length === 0) {
-          this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
-          this.isLoading = false;
-          return;
-        }
-        this.result = result;
-        this.computeCadBounds();
-        this.msBounds = result.modelspaceBounds || null;
-        this.previewTransform = result.previewTransform || null;
-        this.keptEntities = [...result.manifest];
-        this.deletedEntityIds.clear();
-        this.selectedEntityIds.clear();
-        this.mappings.clear();
-        this.previewRendered = false;
-        this.isLoading = false;
-        this.step = 'preview';
+        this.applyConversionResult(result);
       },
       error: (err) => {
         this.errorMessage = err?.error?.message || err?.message || this.translate.instant('dashboard.cad-import-dialog.converting');
         this.isLoading = false;
       }
     });
+  }
+
+  private applyConversionResult(result: CadPerEntityResult): void {
+    if (result.manifest.length === 0) {
+      this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
+      this.step = 'upload';
+      return;
+    }
+    this.result = result;
+    this.computeCadBounds();
+    this.msBounds = result.modelspaceBounds || null;
+    this.previewTransform = result.previewTransform || null;
+    this.keptEntities = [...result.manifest];
+    this.deletedEntityIds.clear();
+    this.selectedEntityIds.clear();
+    this.deletedMasks.forEach(mask => mask.remove());
+    this.deletedMasks.clear();
+    this.deletedMaskLayer = null;
+    this.mappings.clear();
+    this.groupMappings = [];
+    this.previewRendered = false;
+    this.step = 'preview';
   }
 
   private computeCadBounds(): void {
@@ -212,6 +241,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     const outerSvg = document.createElementNS(svgNs, 'svg');
     outerSvg.setAttribute('width', String(VIEWPORT_WIDTH));
     outerSvg.setAttribute('height', String(VIEWPORT_HEIGHT));
+    outerSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     outerSvg.style.display = 'block';
 
     if (this.previewTransform) {
@@ -235,6 +265,11 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
     this.entityGroups.clear();
     this.selectionHighlights.clear();
+    this.deletedMasks.clear();
+    this.deletedMaskLayer = this.svgCanvas.group().addClass('cad-delete-mask-layer').attr({
+      'pointer-events': 'none'
+    });
+    this.renderDeletedPreviewMasks();
     this.highlightLayer = this.svgCanvas.group().addClass('cad-selection-highlight-layer');
     this.bindPreviewEntityGroups();
 
@@ -280,22 +315,24 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
   private toSvgCoords(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.previewCanvasRef.nativeElement.getBoundingClientRect();
-    const screenX = (clientX - rect.left) / this.zoomLevel - this.panX;
-    const screenY = (clientY - rect.top) / this.zoomLevel - this.panY;
-    if (this.previewTransform) {
-      const t = this.previewTransform;
-      const svgX = t.x + (screenX / VIEWPORT_WIDTH) * t.width;
-      const svgY = t.y + (screenY / VIEWPORT_HEIGHT) * t.height;
-      return { x: svgX, y: svgY };
-    }
-    return { x: screenX, y: screenY };
+    return screenPointToPreviewSvgCoords(
+      clientX,
+      clientY,
+      { left: rect.left, top: rect.top },
+      this.zoomLevel,
+      this.panX,
+      this.panY,
+      this.previewTransform,
+      VIEWPORT_WIDTH,
+      VIEWPORT_HEIGHT
+    );
   }
 
   private applyTransform(): void {
     const svgEl = this.previewCanvasRef?.nativeElement?.querySelector('svg');
     if (!svgEl) return;
     svgEl.style.transformOrigin = '0 0';
-    svgEl.style.transform = `scale(${this.zoomLevel}) translate(${this.panX}px, ${this.panY}px)`;
+    svgEl.style.transform = buildPreviewCssTransform(this.zoomLevel, this.panX, this.panY);
   }
 
   onPreviewWheel(event: WheelEvent): void {
@@ -409,20 +446,42 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       this.selectionRect = this.svgCanvas!.rect(0, 0)
         .move(svgCoords.x, svgCoords.y)
         .fill({ color: '#1976d2', opacity: 0.2 })
-        .stroke({ color: '#1976d2', width: 1, dasharray: '4,4' });
+        .stroke({ color: '#1976d2', width: 1, dasharray: '4,4' })
+        .attr({
+          'pointer-events': 'none',
+          'vector-effect': 'non-scaling-stroke'
+        });
     });
   }
 
   private selectEntitiesInRect(x: number, y: number, w: number, h: number): void {
     this.selectedEntityIds.clear();
     for (const [id, group] of this.entityGroups) {
-      const bbox = group.bbox();
-      if (bbox.x < x + w && bbox.x + bbox.width > x &&
+      const bbox = this.entitySelectionBounds(id, group);
+      if (bbox && bbox.x < x + w && bbox.x + bbox.width > x &&
           bbox.y < y + h && bbox.y + bbox.height > y) {
         this.selectedEntityIds.add(id);
       }
     }
     this.updateSelectionVisuals();
+  }
+
+  private entitySelectionBounds(entityId: string, group: G): CadRect | null {
+    const entity = this.result?.manifest.find(e => e.id === entityId);
+    const bbox = entity && this.hasPreviewBounds(entity)
+      ? {
+          x: entity.previewX!,
+          y: entity.previewY!,
+          width: entity.previewWidth!,
+          height: entity.previewHeight!
+        }
+      : group.bbox();
+    if (!Number.isFinite(bbox.x) || !Number.isFinite(bbox.y) ||
+        !Number.isFinite(bbox.width) || !Number.isFinite(bbox.height) ||
+        bbox.width <= 0 || bbox.height <= 0) {
+      return null;
+    }
+    return bbox;
   }
 
   private toggleEntitySelection(entityId: string): void {
@@ -486,12 +545,37 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       entity.previewWidth > 0 && entity.previewHeight > 0;
   }
 
+  private renderDeletedPreviewMasks(): void {
+    for (const id of this.deletedEntityIds) {
+      this.addDeletedPreviewMask(id);
+    }
+  }
+
+  private addDeletedPreviewMask(entityId: string): void {
+    if (!this.deletedMaskLayer || this.deletedMasks.has(entityId)) return;
+    const entity = this.result?.manifest.find(e => e.id === entityId);
+    if (!entity) return;
+    const mask = buildDeletedPreviewMask(entity);
+    if (!mask) return;
+    const rect = this.deletedMaskLayer.rect(mask.width, mask.height)
+      .move(mask.x, mask.y)
+      .fill({ color: '#ffffff', opacity: 1 })
+      .stroke({ width: 0 })
+      .attr({
+        'data-cad-deleted-mask-id': entityId,
+        'pointer-events': 'none'
+      });
+    this.deletedMasks.set(entityId, rect);
+  }
+
   deleteSelected(): void {
+    this.removeGroupsContaining(this.selectedEntityIds);
     for (const id of this.selectedEntityIds) {
       this.deletedEntityIds.add(id);
       this.mappings.delete(id);
       this.selectionHighlights.get(id)?.remove();
       this.selectionHighlights.delete(id);
+      this.addDeletedPreviewMask(id);
       const group = this.entityGroups.get(id);
       if (group) {
         group.remove();
@@ -499,6 +583,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       }
     }
     this.selectedEntityIds.clear();
+    this.updateMappingVisuals();
   }
 
   keepSelected(): void {
@@ -507,36 +592,75 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   onEntityClick(entity: CadEntityInfo): void {
+    const group = this.findGroupByEntityId(entity.id);
+    if (group) {
+      this.openWidgetSelectDialog(widgetInfo => {
+        group.widgetInfo = widgetInfo;
+        this.updateMappingVisuals();
+      });
+      return;
+    }
+    this.openWidgetSelectDialog(widgetInfo => {
+      this.mappings.set(entity.id, widgetInfo);
+      this.updateMappingVisuals();
+    });
+  }
+
+  mapSelectedGroup(): void {
+    const selectedIds = this.sortEntityIdsByManifest(
+      Array.from(this.selectedEntityIds).filter(id => !this.deletedEntityIds.has(id))
+    );
+    if (selectedIds.length < 2) {
+      return;
+    }
+    this.openWidgetSelectDialog(widgetInfo => {
+      const selectedIdSet = new Set(selectedIds);
+      this.removeGroupsContaining(selectedIdSet);
+      selectedIds.forEach(id => this.mappings.delete(id));
+      this.groupMappings.push({
+        id: this.utils.guid(),
+        entityIds: selectedIds,
+        widgetInfo
+      });
+      this.selectedEntityIds.clear();
+      this.updateSelectionVisuals();
+      this.updateMappingVisuals();
+    });
+  }
+
+  private openWidgetSelectDialog(onSelected: (widgetInfo: WidgetInfo) => void): void {
     const dialogRef = this.dialog.open(CadWidgetSelectDialogComponent, {
       panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
       data: { scadaFirst: true }
     });
     dialogRef.afterClosed().subscribe((widgetInfo: WidgetInfo | undefined) => {
       if (widgetInfo) {
-        this.mappings.set(entity.id, widgetInfo);
-        this.updateMappingVisuals();
+        onSelected(widgetInfo);
       }
     });
   }
 
   private mapEntityFromPreview(entity: CadEntityInfo): void {
-    const dialogRef = this.dialog.open(CadWidgetSelectDialogComponent, {
-      panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
-      data: { scadaFirst: true }
-    });
-    dialogRef.afterClosed().subscribe((widgetInfo: WidgetInfo | undefined) => {
-      if (widgetInfo) {
-        this.mappings.set(entity.id, widgetInfo);
+    const group = this.findGroupByEntityId(entity.id);
+    if (group) {
+      this.openWidgetSelectDialog(widgetInfo => {
+        group.widgetInfo = widgetInfo;
         this.updateMappingVisuals();
-      }
+      });
+      return;
+    }
+    this.openWidgetSelectDialog(widgetInfo => {
+      this.mappings.set(entity.id, widgetInfo);
+      this.updateMappingVisuals();
     });
   }
 
   private updateMappingVisuals(): void {
+    const groupedEntityIds = this.currentGroupedEntityIds();
     for (const [id, group] of this.entityGroups) {
       const node = group.node as SVGGElement;
       if (!node) continue;
-      if (this.mappings.has(id) && this.mappings.get(id)) {
+      if (groupedEntityIds.has(id) || (this.mappings.has(id) && this.mappings.get(id))) {
         node.classList.add('mapped');
       } else {
         node.classList.remove('mapped');
@@ -554,16 +678,81 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     this.updateMappingVisuals();
   }
 
+  removeGroupMapping(group: CadEntityGroupMapping): void {
+    this.groupMappings = this.groupMappings.filter(existing => existing.id !== group.id);
+    this.updateMappingVisuals();
+  }
+
+  private findGroupByEntityId(entityId: string): CadEntityGroupMapping | undefined {
+    const activeGroupIds = new Set(this.activeGroupMappings().map(group => group.id));
+    return this.groupMappings.find(group => activeGroupIds.has(group.id) && group.entityIds.includes(entityId));
+  }
+
+  private removeGroupsContaining(entityIds: Set<string>): void {
+    if (!entityIds.size) {
+      return;
+    }
+    this.groupMappings = this.groupMappings.filter(group =>
+      !group.entityIds.some(id => entityIds.has(id))
+    );
+  }
+
+  private sortEntityIdsByManifest(entityIds: string[]): string[] {
+    const order = new Map((this.result?.manifest || []).map((entity, index) => [entity.id, index]));
+    return [...entityIds].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+  }
+
+  private activeGroupMappings(): CadEntityGroupMapping[] {
+    const keptIds = new Set(this.keptEntities
+      .filter(entity => !this.deletedEntityIds.has(entity.id))
+      .map(entity => entity.id));
+    return this.groupMappings
+      .map(group => ({
+        ...group,
+        entityIds: this.sortEntityIdsByManifest(group.entityIds.filter(id => keptIds.has(id)))
+      }))
+      .filter(group => group.entityIds.length >= 2);
+  }
+
+  private currentGroupedEntityIds(): Set<string> {
+    const ids = new Set<string>();
+    this.activeGroupMappings().forEach(group => {
+      group.entityIds.forEach(id => ids.add(id));
+    });
+    return ids;
+  }
+
+  get mappedGroups(): CadEntityGroupMapping[] {
+    return this.activeGroupMappings();
+  }
+
+  get mapStepEntities(): CadEntityInfo[] {
+    const groupedEntityIds = this.currentGroupedEntityIds();
+    return this.keptEntities.filter(entity =>
+      !this.deletedEntityIds.has(entity.id) && !groupedEntityIds.has(entity.id)
+    );
+  }
+
   get mappedCount(): number {
-    let count = 0;
-    for (const mapping of this.mappings.values()) {
-      if (mapping) count++;
+    const groupedEntityIds = this.currentGroupedEntityIds();
+    let count = this.activeGroupMappings().length;
+    for (const entity of this.keptEntities) {
+      if (!this.deletedEntityIds.has(entity.id) && !groupedEntityIds.has(entity.id) && this.mappings.get(entity.id)) {
+        count++;
+      }
     }
     return count;
   }
 
   get unmappedCount(): number {
-    return this.keptEntities.length - this.mappedCount;
+    const groupedEntityIds = this.currentGroupedEntityIds();
+    let count = 0;
+    for (const entity of this.keptEntities) {
+      if (!this.deletedEntityIds.has(entity.id) && !groupedEntityIds.has(entity.id) && !this.mappings.get(entity.id)) {
+        count++;
+      }
+    }
+    return count;
   }
 
   private ensureCompleteSvg(svgContent: string, entity: CadEntityInfo): string {
@@ -622,7 +811,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     }
   }
 
-  private scaleCadToGrid(entity: CadEntityInfo): { col: number; row: number; sizeX: number; sizeY: number } {
+  private scaleCadToGrid(entity: CadEntityInfo | CadImportWidgetEntity): { col: number; row: number; sizeX: number; sizeY: number } {
     if (this.previewTransform && entity.previewX !== undefined && entity.previewY !== undefined &&
         entity.previewWidth !== undefined && entity.previewHeight !== undefined) {
       const t = this.previewTransform;
@@ -665,7 +854,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     return this.scadaSymbolWidgetType$;
   }
 
-  private scadaSymbolTitle(entity: CadEntityInfo): string {
+  private scadaSymbolTitle(entity: CadEntityInfo | CadImportWidgetEntity): string {
     return `CAD ${entity.blockName || entity.type || 'entity'} ${entity.id}`;
   }
 
@@ -704,8 +893,21 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     );
   }
 
-  private createScadaSymbolWidget(entity: CadEntityInfo, scadaSymbolUrl: string, scadaWidgetType: WidgetType): Widget {
-    const { col, row, sizeX, sizeY } = this.scaleCadToGrid(entity);
+  private targetGridRows(): number {
+    const aspectRatio = this.previewTransform
+      ? this.previewTransform.height / this.previewTransform.width
+      : (this.cadBounds ? this.cadBounds.height / this.cadBounds.width : 1);
+    return Math.max(1, Math.round(TARGET_GRID_COLUMNS * aspectRatio));
+  }
+
+  private createScadaSymbolWidget(entity: CadEntityInfo | CadImportWidgetEntity, scadaSymbolUrl: string, scadaWidgetType: WidgetType): Widget {
+    const { col, row, sizeX, sizeY } = expandCadGridBounds(
+      this.scaleCadToGrid(entity),
+      TARGET_GRID_COLUMNS,
+      this.targetGridRows(),
+      MIN_CAD_VISUAL_WIDGET_SIZE_X,
+      MIN_CAD_VISUAL_WIDGET_SIZE_Y
+    );
     const defaultConfig = JSON.parse(scadaWidgetType.descriptor.defaultConfig || '{}');
     const widget: Widget = {
       id: this.utils.guid(),
@@ -715,60 +917,50 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       sizeY,
       row,
       col,
-      config: mergeDeep({} as any, defaultConfig, {
+      config: mergeDeep({} as any, defaultConfig, cadMappedScadaWidgetConfigDefaults({
         title: this.scadaSymbolTitle(entity),
-        showTitle: false,
-        dropShadow: false,
+        type: scadaWidgetType.descriptor.type || widgetType.rpc,
         preserveAspectRatio: true,
-        backgroundColor: 'rgba(0,0,0,0)',
-        padding: '0',
-        margin: '0',
-        settings: {
-          ...(defaultConfig.settings || {}),
-          padding: '0',
-          background: colorBackground('rgba(0,0,0,0)'),
-          scadaSymbolUrl,
-          scadaSymbolContent: null,
-          scadaSymbolObjectSettings: {
-            behavior: {},
-            properties: {}
-          }
-        }
-      })
+        stretchToFit: true,
+        scadaSymbolUrl
+      }))
     };
     return this.dashboardUtils.prepareWidgetForScadaLayout(widget, true);
   }
 
-  private createWidgetForEntity(entity: CadEntityInfo, mapping: WidgetInfo | null): Observable<Widget> {
-    const { col, row, sizeX, sizeY } = this.scaleCadToGrid(entity);
+  private createWidgetForEntity(entity: CadEntityInfo | CadImportWidgetEntity, mapping: WidgetInfo | null): Observable<Widget> {
+    const { col, row, sizeX, sizeY } = expandCadGridBounds(
+      this.scaleCadToGrid(entity),
+      TARGET_GRID_COLUMNS,
+      this.targetGridRows(),
+      MIN_CAD_VISUAL_WIDGET_SIZE_X,
+      MIN_CAD_VISUAL_WIDGET_SIZE_Y
+    );
 
     if (mapping) {
-      const mappedSizeX = Math.max(sizeX, MIN_MAPPED_WIDGET_SIZE_X);
-      const mappedSizeY = Math.max(sizeY, MIN_MAPPED_WIDGET_SIZE_Y);
       return this.widgetService.getWidgetType(mapping.typeFullFqn).pipe(
         map((widgetType) => {
-          const defaultConfig = JSON.parse(widgetType.descriptor.defaultConfig);
+          const defaultConfig = this.dashboardUtils.widgetConfigFromWidgetType(widgetType.descriptor);
           const widget: Widget = {
             id: this.utils.guid(),
             typeFullFqn: mapping.typeFullFqn,
             type: mapping.type,
-            sizeX: mappedSizeX,
-            sizeY: mappedSizeY,
+            sizeX,
+            sizeY,
             row,
             col,
-            config: mergeDeep({} as any, defaultConfig, {
+            config: mergeDeep({} as any, defaultConfig, cadMappedScadaWidgetConfigDefaults({
               title: mapping.title,
-              settings: {
-                ...defaultConfig.settings
-              }
-            })
+              type: mapping.type,
+              preserveAspectRatio: false
+            }))
           };
-          return widget;
+          return this.dashboardUtils.validateAndUpdateWidget(widget);
         })
       );
     } else {
       return this.getScadaSymbolWidgetType().pipe(
-        switchMap(scadaWidgetType => this.uploadScadaSymbol(entity).pipe(
+        switchMap(scadaWidgetType => this.uploadScadaSymbol(entity as CadEntityInfo).pipe(
           map(scadaSymbolUrl => this.createScadaSymbolWidget(entity, scadaSymbolUrl, scadaWidgetType))
         ))
       );
@@ -777,25 +969,37 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
   generateWidgets(): Observable<Widget[]> {
     const importEntities = this.keptEntities.filter(entity => !this.deletedEntityIds.has(entity.id));
-    this.importTotal = importEntities.length;
+    const widgetItems = buildCadImportWidgetItems<WidgetInfo>({
+      entities: importEntities,
+      deletedEntityIds: this.deletedEntityIds,
+      entityMappings: this.mappings,
+      groupMappings: this.activeGroupMappings()
+    });
+    const plan = cadImportWidgetPlan({
+      importEntityCount: widgetItems.length
+    });
+    this.importTotal = plan.totalWorkItems;
     this.importProgress = 0;
 
-    return from(importEntities).pipe(
-      concatMap(entity => {
-        const mapping = this.mappings.get(entity.id) || null;
-        return this.createWidgetForEntity(entity, mapping).pipe(
+    return from(widgetItems).pipe(
+      mergeMap((item, index) => {
+        return this.createWidgetForEntity(item.entity, item.mapping).pipe(
+          map(widget => ({ index, widget })),
           catchError(err => {
-            console.warn(`Failed to create widget for entity ${entity.id}:`, err);
-            return of(null);
+            console.warn(`Failed to create widget for CAD import item ${item.id}:`, err);
+            return of({ index, widget: null });
           }),
           finalize(() => {
             this.importProgress++;
             this.cd.markForCheck();
           })
         );
-      }),
+      }, CAD_IMPORT_WIDGET_CONCURRENCY),
       toArray(),
-      map(widgets => widgets.filter((widget): widget is Widget => !!widget))
+      map(results => results
+        .sort((a, b) => a.index - b.index)
+        .map(result => result.widget)
+        .filter((widget): widget is Widget => !!widget))
     );
   }
 
@@ -841,7 +1045,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   goBack(): void {
-    const steps: Array<typeof this.step> = ['upload', 'preview', 'map', 'review'];
+    const steps: CadImportStep[] = ['upload', 'preview', 'map', 'review'];
     const index = steps.indexOf(this.step);
     if (index > 0) {
       this.step = steps[index - 1];
@@ -854,13 +1058,18 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   goNext(): void {
     if (this.step === 'preview') {
       this.keptEntities = this.result!.manifest.filter(e => !this.deletedEntityIds.has(e.id));
+      this.groupMappings = this.activeGroupMappings();
+      const groupedEntityIds = this.currentGroupedEntityIds();
       for (const entity of this.keptEntities) {
-        if (!this.mappings.has(entity.id)) {
+        if (!groupedEntityIds.has(entity.id) && !this.mappings.has(entity.id)) {
           this.mappings.set(entity.id, null);
         }
       }
+    } else if (this.step === 'map') {
+      this.onImportClick();
+      return;
     }
-    const steps: Array<typeof this.step> = ['upload', 'preview', 'map', 'review'];
+    const steps: CadImportStep[] = ['upload', 'preview', 'map', 'review'];
     const index = steps.indexOf(this.step);
     if (index < steps.length - 1) {
       this.step = steps[index + 1];

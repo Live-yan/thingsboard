@@ -1,3 +1,19 @@
+#
+# Copyright © 2016-2026 The Thingsboard Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """
 DWG → SVG 转换脚本。
 流程: DWG → (ODA File Converter) → DXF → (ezdxf SVGBackend) → SVG
@@ -216,9 +232,10 @@ def dwg_to_dxf(dwg_path: Path, output_dir: Path | None = None) -> Path:
 
 
 # ── 渲染工具 ──────────────────────────────────────────────────────────
-def _render_msp_to_svg(doc, msp, coord_space: int = 1_000_000) -> str:
+def _render_msp_to_svg(doc, msp, coord_space: int = 1_000_000, ctx: RenderContext = None) -> str:
     """使用 SVGBackend 渲染 modelspace，自动处理坐标变换和 viewBox。"""
-    ctx = RenderContext(doc)
+    if ctx is None:
+        ctx = RenderContext(doc)
     backend = svg.SVGBackend()
     frontend = Frontend(ctx, backend)
     frontend.draw_layout(msp)
@@ -1067,6 +1084,7 @@ def dxf_to_per_entity_svgs(dxf_path: Path, output_folder: Path,
 
     tmp_doc = ezdxf.new(doc.dxfversion)
     tmp_msp = tmp_doc.modelspace()
+    tmp_ctx = RenderContext(tmp_doc)
 
     for i, entity in enumerate(all_entities):
         etype = entity.dxftype()
@@ -1102,7 +1120,7 @@ def dxf_to_per_entity_svgs(dxf_path: Path, output_folder: Path,
                 except Exception as e:
                     print(f"      跳过无法添加的子实体: {e}")
 
-            entity_svg = _render_msp_to_svg(tmp_doc, tmp_msp, coord_space=BLOCK_COORD_SPACE)
+            entity_svg = _render_msp_to_svg(tmp_doc, tmp_msp, coord_space=BLOCK_COORD_SPACE, ctx=tmp_ctx)
             entity_svg = _strip_xml_prolog(entity_svg)
 
             if entity_svg.strip().endswith("/>") or "</svg>" not in entity_svg or len(entity_svg) < 50:
@@ -1281,7 +1299,15 @@ def dwg_to_svg(dwg_path: Path, output_folder: Path | None = None,
     """DWG → DXF → SVG 文件夹。"""
     print(f"[1/2] DWG → DXF: {dwg_path.name}")
     t0 = time.time()
-    dxf_path = dwg_to_dxf(dwg_path)
+
+    needs_dxf = dwg_path.suffix.lower() == ".dwg"
+    if needs_dxf:
+        tmp_dir = tempfile.TemporaryDirectory(prefix="dwg2svg_")
+        dxf_path = dwg_to_dxf(dwg_path, Path(tmp_dir.name))
+    else:
+        tmp_dir = None
+        dxf_path = dwg_path
+
     t1 = time.time()
     print(f"      DXF 完成: {dxf_path.name} ({t1 - t0:.1f}s)")
 
@@ -1289,18 +1315,22 @@ def dwg_to_svg(dwg_path: Path, output_folder: Path | None = None,
         output_folder = OUTPUT_DIR / dwg_path.stem
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    print(f"[2/2] DXF → SVG 文件夹: {output_folder}")
-    info = dxf_to_svg_folder(dxf_path, output_folder,
-                             invert_block_colors=invert_block_colors)
-    t2 = time.time()
-    print(f"      完成 ({t2 - t1:.1f}s)")
-    print(f"      总耗时: {t2 - t0:.1f}s")
+    try:
+        print(f"[2/2] DXF → SVG 文件夹: {output_folder}")
+        info = dxf_to_svg_folder(dxf_path, output_folder,
+                                 invert_block_colors=invert_block_colors)
+        t2 = time.time()
+        print(f"      完成 ({t2 - t1:.1f}s)")
+        print(f"      总耗时: {t2 - t0:.1f}s")
 
-    return info
+        return info
+    finally:
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
 
 
 # ── 命令行 ────────────────────────────────────────────────────────────
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="DWG → SVG 转换工具")
     parser.add_argument("input", nargs="?", help="输入 DWG 文件路径")
     parser.add_argument("-o", "--output", help="输出文件夹路径")
@@ -1322,7 +1352,7 @@ def main():
         files = [Path(args.input)]
     else:
         parser.print_help()
-        return
+        return 1
 
     success, fail = 0, 0
     for dwg_file in files:
@@ -1338,16 +1368,24 @@ def main():
         print(f"{'='*60}")
         try:
             if args.per_entity:
-                dxf_path = dwg_file
                 if dwg_file.suffix.lower() == ".dwg":
-                    dxf_path = dwg_to_dxf(dwg_file)
-                if out_folder is None:
-                    out_folder = OUTPUT_DIR / dwg_file.stem / "per_entity"
-                dxf_to_per_entity_svgs(
-                    dxf_path, out_folder,
-                    max_entities=args.max_entities,
-                    invert_block_colors=args.invert,
-                )
+                    with tempfile.TemporaryDirectory(prefix="dwg2svg_") as tmp_dir:
+                        dxf_path = dwg_to_dxf(dwg_file, Path(tmp_dir))
+                        if out_folder is None:
+                            out_folder = OUTPUT_DIR / dwg_file.stem / "per_entity"
+                        dxf_to_per_entity_svgs(
+                            dxf_path, out_folder,
+                            max_entities=args.max_entities,
+                            invert_block_colors=args.invert,
+                        )
+                else:
+                    if out_folder is None:
+                        out_folder = OUTPUT_DIR / dwg_file.stem / "per_entity"
+                    dxf_to_per_entity_svgs(
+                        dwg_file, out_folder,
+                        max_entities=args.max_entities,
+                        invert_block_colors=args.invert,
+                    )
             else:
                 dwg_to_svg(dwg_file, out_folder,
                            invert_block_colors=args.invert)
@@ -1359,7 +1397,8 @@ def main():
     print(f"\n{'='*60}")
     print(f"完成: {success} 成功, {fail} 失败")
     print(f"{'='*60}")
+    return 0 if fail == 0 and success > 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

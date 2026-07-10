@@ -113,6 +113,7 @@ import { StatesControllerModule } from '@home/components/dashboard-page/states/s
 import { DashboardLayoutComponent } from '@home/components/dashboard-page/layout/dashboard-layout.component';
 import { EditWidgetComponent } from '@home/components/dashboard-page/edit-widget.component';
 import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
+import { IotHubComponentsModule } from '@home/components/iot-hub/iot-hub-components.module';
 import { AddWidgetDialogComponent } from '@home/components/dashboard-page/add-widget-dialog.component';
 import { CadImportDialogComponent } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dialog.component';
 import { CadWidgetSelectDialogComponent } from '@home/components/dashboard-page/cad-import-dialog/cad-widget-select-dialog.component';
@@ -127,7 +128,6 @@ import { EmbedDashboardDialogComponent } from '@home/components/widget/dialog/em
 import { EMBED_DASHBOARD_DIALOG_TOKEN } from '@home/components/widget/dialog/embed-dashboard-dialog-token';
 import { EdgeDownlinkTableComponent } from '@home/components/edge/edge-downlink-table.component';
 import { EdgeDownlinkTableHeaderComponent } from '@home/components/edge/edge-downlink-table-header.component';
-import { DisplayWidgetTypesPanelComponent } from '@home/components/dashboard-page/widget-types-panel.component';
 import { AlarmDurationPredicateValueComponent } from '@home/components/profile/alarm/alarm-duration-predicate-value.component';
 import { DashboardImageDialogComponent } from '@home/components/dashboard-page/dashboard-image-dialog.component';
 import {
@@ -204,6 +204,8 @@ import { ApiKeyGeneratedDialogComponent } from '@home/components/api-key/api-key
 import { ApiKeysTableDialogComponent } from '@home/components/api-key/api-keys-table-dialog.component';
 import { AuditLogFilterComponent } from "@home/components/audit-log/audit-log-filter.component";
 import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
+import { NotificationBellModule } from '@home/components/notification/notification-bell.module';
+import { GithubBadgeModule } from '@home/components/github-badge/github-badge.module';
 
 @NgModule({
   declarations:
@@ -330,7 +332,6 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
       DashboardStateDialogComponent,
       DashboardImageDialogComponent,
       EmbedDashboardDialogComponent,
-      DisplayWidgetTypesPanelComponent,
       TenantProfileQueuesComponent,
       QueueFormComponent,
       RepositorySettingsComponent,
@@ -363,7 +364,7 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
       ApiKeyGeneratedDialogComponent,
       AuditLogHeaderComponent,
       AuditLogFilterComponent,
-      EventsDialogComponent
+      EventsDialogComponent,
     ],
   imports: [
     CommonModule,
@@ -371,6 +372,7 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
     SharedHomeComponentsModule,
     CalculatedFieldsModule,
     AlarmRuleModule,
+    IotHubComponentsModule,
     WidgetConfigComponentsModule,
     BasicWidgetConfigModule,
     Lwm2mProfileComponentsModule,
@@ -378,7 +380,9 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
     StatesControllerModule,
     DeviceCredentialsModule,
     DeviceProfileCommonModule,
-    EntityDebugSettingsButtonComponent
+    EntityDebugSettingsButtonComponent,
+    NotificationBellModule,
+    GithubBadgeModule
   ],
   exports: [
     RouterTabsComponent,
@@ -475,6 +479,7 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
     SelectDashboardBreakpointComponent,
     EditWidgetComponent,
     DashboardWidgetSelectComponent,
+    IotHubComponentsModule,
     AddWidgetDialogComponent,
     CadImportDialogComponent,
     MoveWidgetsDialogComponent,
@@ -485,7 +490,6 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
     DashboardStateDialogComponent,
     DashboardImageDialogComponent,
     EmbedDashboardDialogComponent,
-    DisplayWidgetTypesPanelComponent,
     TenantProfileQueuesComponent,
     QueueFormComponent,
     RepositorySettingsComponent,
@@ -513,7 +517,7 @@ import { EventsDialogComponent } from '@home/dialogs/events-dialog.component';
     ResourcesLibraryComponent,
     ApiKeysTableComponent,
     ApiKeysTableDialogComponent,
-    EventsDialogComponent
+    EventsDialogComponent,
   ],
   providers: [
     WidgetComponentService,

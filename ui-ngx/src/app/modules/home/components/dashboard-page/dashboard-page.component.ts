@@ -30,7 +30,6 @@ import {
   OnInit,
   Optional,
   Renderer2,
-  StaticProvider,
   ViewChild,
   ViewContainerRef,
   ViewEncapsulation,
@@ -81,7 +80,6 @@ import {
   WidgetInfo,
   WidgetPosition,
   WidgetSize,
-  widgetType,
   widgetTypesData
 } from '@shared/models/widget.models';
 import { environment as env } from '@env/environment';
@@ -126,22 +124,17 @@ import {
   ManageDashboardStatesDialogResult
 } from '@home/components/dashboard-page/states/manage-dashboard-states-dialog.component';
 import { ImportExportService } from '@shared/import-export/import-export.service';
+import { ActionNotificationShow } from '@core/notification/notification.actions';
 import { AuthState } from '@app/core/auth/auth.models';
 import { FiltersDialogComponent, FiltersDialogData } from '@home/components/filter/filters-dialog.component';
 import { Filters } from '@shared/models/query/query.models';
-import { ConnectedPosition, Overlay, OverlayConfig, OverlayRef } from '@angular/cdk/overlay';
-import { ComponentPortal } from '@angular/cdk/portal';
-import {
-  DISPLAY_WIDGET_TYPES_PANEL_DATA,
-  DisplayWidgetTypesPanelComponent,
-  DisplayWidgetTypesPanelData
-} from '@home/components/dashboard-page/widget-types-panel.component';
 import { DashboardWidgetSelectComponent } from '@home/components/dashboard-page/dashboard-widget-select.component';
 import { CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dialog.component';
 import {
   applyCadImportGridSettings,
   syncCadImportLayoutContext
 } from '@home/components/dashboard-page/cad-import-dialog/cad-import-dashboard-layout';
+import { insertWidgetsInFrames } from '@home/components/dashboard-page/cad-import-dialog/cad-import-frame-batch';
 import { MobileService } from '@core/services/mobile.service';
 
 import {
@@ -165,6 +158,7 @@ import {
   MoveWidgetsDialogResult
 } from '@home/components/dashboard-page/layout/move-widgets-dialog.component';
 import { HttpStatusCode } from '@angular/common/http';
+import { HomeService } from '@core/services/home.service';
 
 // @dynamic
 @Component({
@@ -216,6 +210,9 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
   }
 
   @Input()
+  hideMainToolbar = true;
+
+  @Input()
   syncStateWithQueryParam = true;
 
   @Input()
@@ -252,7 +249,6 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
   forceDashboardMobileMode = false;
   isAddingWidget = false;
   isAddingWidgetClosed = true;
-  filterWidgetTypes: widgetType[] = null;
 
   isToolbarOpened = false;
   isToolbarOpenedAnimate = false;
@@ -284,7 +280,7 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
   dashboardLogoLink = this.getDashboardLogoLink();
 
   private dashboardLogoCache: SafeUrl;
-  private defaultDashboardLogo = 'assets/logo_title_white.svg';
+  private defaultDashboardLogo = 'assets/logo_title_black.svg';
 
   private dashboardResize$: ResizeObserver;
 
@@ -355,7 +351,7 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
   }
 
   get mobileDisplayRightLayoutFirst(): boolean {
-    return this.isMobile && this.layouts.right.layoutCtx.gridSettings?.mobileDisplayLayoutFirst;
+    return this.isMobile && this.layouts.right.show && this.layouts.right.layoutCtx.gridSettings?.mobileDisplayLayoutFirst;
   }
 
   set mobileDisplayRightLayoutFirst(mobileDisplayRightLayoutFirst: boolean) {
@@ -388,11 +384,11 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
               private renderer: Renderer2,
               private ngZone: NgZone,
               @Optional() @Inject('embeddedValue') private embeddedValue,
-              private overlay: Overlay,
               private viewContainerRef: ViewContainerRef,
               private cd: ChangeDetectorRef,
               public elRef: ElementRef,
-              private injector: Injector) {
+              private injector: Injector,
+              public homeService: HomeService) {
     super(store);
     if (isDefinedAndNotNull(this.embeddedValue)) {
       this.embedded = this.embeddedValue;
@@ -400,6 +396,9 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
   }
 
   ngOnInit() {
+    if (this.hideMainToolbar) {
+      this.homeService.setHideMainToolbar(true);
+    }
     this.rxSubscriptions.push(this.route.data.subscribe(
       (data) => {
         let dashboardPageInitData: DashboardPageInitData;
@@ -885,6 +884,10 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
     return this.authUser.authority === Authority.SYS_ADMIN;
   }
 
+  public canEdit(): boolean {
+    return this.isTenantAdmin() || (this.isSystemAdmin() && this.widgetEditMode);
+  }
+
   public exportDashboard($event: Event) {
     if ($event) {
       $event.preventDefault();
@@ -1292,41 +1295,69 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
     if ($event) {
       $event.stopPropagation();
     }
-    this.importExport.importCadFilePerEntity().subscribe((cadResult) => {
-      if (!cadResult) {
-        return;
-      }
-      this.dialog.open<CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult>(
-        CadImportDialogComponent,
-        {
-          disableClose: true,
-          panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
-          data: { dashboard: this.dashboard, result: cadResult }
-        }
-      ).afterClosed().subscribe((result) => {
-        if (!result || !result.widgets?.length) {
+    this.importExport.importCadFilePerEntity().subscribe({
+      next: (cadResult) => {
+        if (!cadResult) {
           return;
         }
-        const stateId = this.dashboardCtx.state;
-        const layout = this.dashboard.configuration.states[stateId].layouts.main;
-        applyCadImportGridSettings(layout, result);
-        for (const widget of result.widgets) {
+        this.openCadImportDialog(cadResult);
+      },
+      error: (err) => {
+        this.showCadImportError(err);
+      }
+    });
+  }
+
+  private openCadImportDialog(cadResult: any): void {
+    this.dialog.open<CadImportDialogComponent, CadImportDialogData, CadImportDashboardResult>(
+      CadImportDialogComponent,
+      {
+        disableClose: true,
+        panelClass: ['tb-dialog', 'tb-fullscreen-dialog'],
+        data: { dashboard: this.dashboard, result: cadResult }
+      }
+    ).afterClosed().subscribe((result) => {
+      if (!result || !result.widgets?.length) {
+        return;
+      }
+      const stateId = this.dashboardCtx.state;
+      const layout = this.dashboard.configuration.states[stateId].layouts.main;
+      applyCadImportGridSettings(layout, result);
+      const batchItems = result.widgets.map((widget) => ({
+        widget,
+        row: widget.row,
+        col: widget.col
+      }));
+      insertWidgetsInFrames(
+        batchItems,
+        this,
+        (self, item) => {
+          const widget = item.widget;
           const originalSize: WidgetSize = {
             sizeX: widget.sizeX,
             sizeY: widget.sizeY,
             preserveAspectRatio: widget.config.preserveAspectRatio,
             resizable: widget.config.resizable
           };
-          this.dashboardUtils.addWidgetToLayout(
-            this.dashboard, stateId, 'main', widget,
+          self.dashboardUtils.addWidgetToLayout(
+            self.dashboard, stateId, 'main', widget,
             result.targetColumns, originalSize,
             widget.row, widget.col, 'default', true
           );
+        },
+        (_self, _batchIndex) => {},
+        (self) => {
+          self.refreshCadImportLayout(layout);
+          self.scheduleCadImportLayoutRefresh(layout);
         }
-        this.refreshCadImportLayout(layout);
-        this.scheduleCadImportLayoutRefresh(layout);
-      });
+      );
     });
+  }
+
+  private showCadImportError(err: any): void {
+    const message = err?.error?.message || err?.message || this.translate.instant('dashboard.cad-import-failed');
+    this.store.dispatch(new ActionNotificationShow(
+      {message, type: 'error'}));
   }
 
   private refreshCadImportLayout(layout: DashboardLayout) {
@@ -1749,59 +1780,6 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
     return widgetContextActions;
   }
 
-  clearSelectedWidgetBundle() {
-    this.dashboardWidgetSelectComponent.search = '';
-    this.dashboardWidgetSelectComponent.widgetsBundle = null;
-    this.dashboardWidgetSelectComponent.selectWidgetMode = 'bundles';
-  }
-
-  editWidgetsTypesToDisplay($event: Event) {
-    if ($event) {
-      $event.stopPropagation();
-    }
-    const target = $event.target || $event.currentTarget;
-    const config = new OverlayConfig();
-    config.backdropClass = 'cdk-overlay-transparent-backdrop';
-    config.hasBackdrop = true;
-    const connectedPosition: ConnectedPosition = {
-      originX: 'end',
-      originY: 'bottom',
-      overlayX: 'end',
-      overlayY: 'top'
-    };
-    config.positionStrategy = this.overlay.position().flexibleConnectedTo(target as HTMLElement)
-      .withPositions([connectedPosition]);
-
-    const overlayRef = this.overlay.create(config);
-    overlayRef.backdropClick().subscribe(() => {
-      overlayRef.dispose();
-    });
-
-    const filterWidgetTypes = this.dashboardWidgetSelectComponent.filterWidgetTypes;
-    const widgetTypesList = Array.from(this.dashboardWidgetSelectComponent.widgetTypes.values()).map(type =>
-      ({type, display: filterWidgetTypes === null ? true : filterWidgetTypes.includes(type)}));
-
-    const providers: StaticProvider[] = [
-      {
-        provide: DISPLAY_WIDGET_TYPES_PANEL_DATA,
-        useValue: {
-          types: widgetTypesList,
-          typesUpdated: (newTypes) => {
-            this.filterWidgetTypes = newTypes.filter(type => type.display).map(type => type.type);
-            this.cd.markForCheck();
-          }
-        } as DisplayWidgetTypesPanelData
-      },
-      {
-        provide: OverlayRef,
-        useValue: overlayRef
-      }
-    ];
-    const injector = Injector.create({parent: this.viewContainerRef.injector, providers});
-    overlayRef.attach(new ComponentPortal(DisplayWidgetTypesPanelComponent, this.viewContainerRef, injector));
-    this.cd.markForCheck();
-  }
-
   public updateDashboardImage($event: Event) {
     if ($event) {
       $event.stopPropagation();
@@ -1867,6 +1845,10 @@ export class DashboardPageComponent extends PageComponent implements IDashboardC
         });
       });
     }
+  }
+
+  toggleSidenav() {
+    this.homeService.toggleSideBar.emit();
   }
 
   get showMainLayoutFiller(): boolean {

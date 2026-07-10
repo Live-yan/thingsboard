@@ -104,6 +104,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   isLoading = false;
   importProgress = 0;
   importTotal = 0;
+  importFailedCount = 0;
+  importFailedIds: string[] = [];
   result: CadPerEntityResult | null = null;
   keptEntities: CadEntityInfo[] = [];
   mappings: Map<string, WidgetInfo | null> = new Map<string, WidgetInfo | null>();
@@ -1038,27 +1040,53 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     }
   }
 
+  private derivePreviewViewBox(): { x: number; y: number; width: number; height: number } | undefined {
+    if (this.previewTransform) {
+      return {
+        x: this.previewTransform.x,
+        y: this.previewTransform.y,
+        width: this.previewTransform.width,
+        height: this.previewTransform.height
+      };
+    }
+    if (this.cadBounds) {
+      return {
+        x: this.cadBounds.minX,
+        y: this.cadBounds.minY,
+        width: this.cadBounds.width,
+        height: this.cadBounds.height
+      };
+    }
+    return undefined;
+  }
+
   generateWidgets(): Observable<Widget[]> {
     const importEntities = this.keptEntities.filter(entity => !this.deletedEntityIds.has(entity.id));
+    const previewViewBox = this.derivePreviewViewBox();
     const widgetItems = buildCadImportWidgetItems<WidgetInfo>({
       entities: importEntities,
       deletedEntityIds: this.deletedEntityIds,
       entityMappings: this.mappings,
-      groupMappings: this.activeGroupMappings()
+      groupMappings: this.activeGroupMappings(),
+      previewViewBox
     });
     const plan = cadImportWidgetPlan({
       importEntityCount: widgetItems.length
     });
     this.importTotal = plan.totalWorkItems;
     this.importProgress = 0;
+    this.importFailedCount = 0;
+    this.importFailedIds = [];
 
     return from(widgetItems).pipe(
       mergeMap((item, index) => {
         return this.createWidgetForEntity(item.entity, item.mapping).pipe(
-          map(widget => ({ index, widget })),
+          map(widget => ({ index, widget, itemId: item.id })),
           catchError(err => {
             console.warn(`Failed to create widget for CAD import item ${item.id}:`, err);
-            return of({ index, widget: null });
+            this.importFailedCount++;
+            this.importFailedIds.push(item.id);
+            return of({ index, widget: null, itemId: item.id });
           }),
           finalize(() => {
             this.importProgress++;
@@ -1087,6 +1115,11 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         if (widgets.length === 0) {
           this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
           return;
+        }
+        if (this.importFailedCount > 0) {
+          const failedMessage = this.translate.instant('dashboard.cad-import-dialog.partial-import-failed',
+            { count: this.importFailedCount });
+          this.errorMessage = failedMessage;
         }
         this.dialogRef.close({
           widgets,

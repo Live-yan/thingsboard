@@ -1,1 +1,0 @@
-INSERT INTO "queue_stats" ("id", "created_time", "tenant_id", "queue_name", "service_id") VALUES ('71b46180-6572-11f1-9ff9-fb7b54520608', 1781167763352, 'f21570f0-6570-11f1-9578-071530b96ddb', 'Main', 'tb-ce-node');

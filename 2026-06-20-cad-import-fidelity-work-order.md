@@ -216,4 +216,3 @@ End-to-end verification:
 - [ ] Can a deleted preview entity still survive in the uploaded SVG or generated widgets?
 - [ ] Can Gridster collision handling still move imported CAD geometry?
 - [ ] Do tests include overlapping, rotated, text, hatch, and tiny-entity cases?
-

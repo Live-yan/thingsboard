@@ -90,6 +90,7 @@ import {
 import { FormProperty, propertyValid } from '@shared/models/dynamic-form.models';
 import { CalculatedFieldsService } from '@core/http/calculated-fields.service';
 import { CalculatedField } from '@shared/models/calculated-field.models';
+import { RuleChainId } from '@shared/models/id/rule-chain-id';
 import { CadConvertResult } from '@shared/models/cad-block-preview.models';
 import { CadPerEntityResult } from '@shared/models/cad-per-entity.models';
 
@@ -97,6 +98,9 @@ export type editMissingAliasesFunction = (widgets: Array<Widget>, isSingleWidget
                                           customTitle: string, missingEntityAliases: EntityAliases) => Observable<EntityAliases>;
 
 type SupportEntityResources = 'includeResourcesInExportWidgetTypes' | 'includeResourcesInExportDashboard' | 'includeBundleWidgetsInExport';
+
+const profileRuleChainFields = ['defaultRuleChainId', 'defaultEdgeRuleChainId'] as const;
+type ProfileRuleChainField = typeof profileRuleChainFields[number];
 
 // @dynamic
 @Injectable()
@@ -199,9 +203,7 @@ export class ImportExportService {
         });
       };
       input.click();
-    }).pipe(
-      catchError(() => of(null))
-    );
+    });
   }
 
   public importCadFilePerEntity(): Observable<CadPerEntityResult> {
@@ -242,7 +244,7 @@ export class ImportExportService {
         const onFocus = () => this.document.defaultView?.setTimeout(completeWithoutFile, 300);
         this.document.defaultView?.addEventListener('focus', onFocus, { once: true });
       }, 0);
-    }).pipe(catchError(() => of(null)));
+    });
   }
 
   public exportCalculatedField(calculatedFieldId: string): void {
@@ -822,7 +824,8 @@ export class ImportExportService {
               type: 'error'}));
           throw new Error('Invalid device profile file');
         } else {
-            return this.deviceProfileService.saveDeviceProfile(this.prepareImport(deviceProfile));
+          return this.clearMissingRuleChainsAndSave(deviceProfile,
+            profile => this.deviceProfileService.saveDeviceProfile(profile));
         }
       }),
       catchError(() => of(null))
@@ -849,10 +852,41 @@ export class ImportExportService {
               type: 'error'}));
           throw new Error('Invalid asset profile file');
         } else {
-          return this.assetProfileService.saveAssetProfile(this.prepareImport(assetProfile));
+          return this.clearMissingRuleChainsAndSave(assetProfile,
+            profile => this.assetProfileService.saveAssetProfile(profile));
         }
       }),
       catchError(() => of(null))
+    );
+  }
+
+  private clearMissingRuleChainsAndSave<T extends ExportableEntity<EntityId> & Partial<Record<ProfileRuleChainField, RuleChainId>>>(
+    profile: T, save: (profile: T) => Observable<T>): Observable<T> {
+    return this.clearMissingProfileRuleChains(profile).pipe(
+      mergeMap(cleared => save(this.prepareImport(cleared)))
+    );
+  }
+
+  private clearMissingProfileRuleChains<T extends Partial<Record<ProfileRuleChainField, RuleChainId>>>(profile: T): Observable<T> {
+    const fieldsToCheck = profileRuleChainFields.filter(field => profile[field]?.id);
+
+    if (!fieldsToCheck.length) {
+      return of(profile);
+    }
+    const ruleChainIds = fieldsToCheck.map(field => profile[field].id);
+    return this.ruleChainService.getRuleChainsByIds(ruleChainIds, {ignoreErrors: true, ignoreLoading: true}).pipe(
+      map(ruleChains => {
+        const existingIds = new Set(ruleChains.map(ruleChain => ruleChain.id.id));
+        const missingFields = fieldsToCheck.filter(field => !existingIds.has(profile[field].id));
+        if (!missingFields.length) {
+          return profile;
+        }
+        this.store.dispatch(new ActionNotificationShow(
+          {message: this.translate.instant('rulechain.rulechain-not-found-warning'),
+            type: 'warn'}));
+        missingFields.forEach(field => profile[field] = null);
+        return profile;
+      })
     );
   }
 

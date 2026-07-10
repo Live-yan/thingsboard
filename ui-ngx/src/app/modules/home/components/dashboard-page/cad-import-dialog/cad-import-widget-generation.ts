@@ -69,6 +69,74 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   deletedEntityIds: Set<string>;
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
+  /** When supplied, all unmapped entities are merged into ONE composite item using this preview viewBox. */
+  previewViewBox?: { x: number; y: number; width: number; height: number };
+}
+
+const UNMAPPED_COMPOSITE_ID = 'cad-unmapped-composite';
+
+function hasPreviewBounds(entity: CadImportWidgetEntity): boolean {
+  return Number.isFinite(entity.previewX) && Number.isFinite(entity.previewY) &&
+    Number.isFinite(entity.previewWidth) && Number.isFinite(entity.previewHeight) &&
+    entity.previewWidth! > 0 && entity.previewHeight! > 0;
+}
+
+function unionBounds<T>(
+  entities: T[],
+  boundsProvider: (entity: T) => { x: number; y: number; width: number; height: number }
+): { x: number; y: number; width: number; height: number } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const entity of entities) {
+    const b = boundsProvider(entity);
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(maxX - minX, 1),
+    height: Math.max(maxY - minY, 1)
+  };
+}
+
+function decodeBase64Safe(value: string): string {
+  if (!value) return '';
+  try { return atob(value); } catch { return ''; }
+}
+
+function stripOuterSvg(svg: string): string {
+  let s = svg.trim();
+  if (s.startsWith('<?xml')) {
+    const end = s.indexOf('?>');
+    if (end !== -1) s = s.slice(end + 2).trim();
+  }
+  s = s.replace(/<tb:metadata[\s\S]*?<\/tb:metadata>/g, '');
+  const openIdx = s.indexOf('<svg');
+  if (openIdx === -1) return s;
+  const openEnd = s.indexOf('>', openIdx);
+  if (openEnd === -1) return s;
+  const closeIdx = s.lastIndexOf('</svg>');
+  if (closeIdx === -1 || closeIdx <= openEnd) return s;
+  return s.slice(openEnd + 1, closeIdx).trim();
+}
+
+function buildCompositeSvgBase64(
+  entities: CadImportWidgetEntity[],
+  viewBox: { x: number; y: number; width: number; height: number }
+): string {
+  const parts: string[] = [];
+  for (const entity of entities) {
+    const inner = stripOuterSvg(decodeBase64Safe(entity.svgBase64));
+    if (inner) parts.push(inner);
+  }
+  const vb = `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`;
+  const merged = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:tb="https://thingsboard.io/svg" viewBox="${vb}">${parts.join('\n')}</svg>`;
+  try { return btoa(merged); } catch { return ''; }
 }
 
 export function buildCadImportWidgetItems<TWidgetInfo = any>(
@@ -92,6 +160,8 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(
   }
 
   const items: CadImportWidgetItem<TWidgetInfo>[] = [];
+  const unmappedEntities: CadImportWidgetEntity[] = [];
+
   for (const entity of input.entities) {
     if (input.deletedEntityIds.has(entity.id)) {
       continue;
@@ -110,14 +180,69 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(
     if (groupedEntityIds.has(entity.id)) {
       continue;
     }
-    items.push({
-      id: entity.id,
-      entityIds: [entity.id],
-      entity,
-      mapping: input.entityMappings.get(entity.id) || null
-    });
+    const mapping = input.entityMappings.get(entity.id) || null;
+    if (mapping) {
+      items.push({
+        id: entity.id,
+        entityIds: [entity.id],
+        entity,
+        mapping
+      });
+    } else if (input.previewViewBox) {
+      unmappedEntities.push(entity);
+    } else {
+      items.push({
+        id: entity.id,
+        entityIds: [entity.id],
+        entity,
+        mapping: null
+      });
+    }
   }
+
+  if (unmappedEntities.length > 0 && input.previewViewBox) {
+    const compositeViewBox = input.previewViewBox;
+    const compositeEntity: CadImportWidgetEntity = {
+      id: UNMAPPED_COMPOSITE_ID,
+      type: 'UNMAPPED_COMPOSITE',
+      svgBase64: buildCompositeSvgBase64(unmappedEntities, compositeViewBox),
+      ...unionBounds(unmappedEntities, entity => ({
+        x: entity.x, y: entity.y, width: entity.width, height: entity.height
+      })),
+      blockName: `Background (${unmappedEntities.length} entities)`,
+      ...(() => {
+        if (unmappedEntities.every(hasPreviewBounds)) {
+          const pb = unionBounds(unmappedEntities, entity => ({
+            x: entity.previewX!, y: entity.previewY!,
+            width: entity.previewWidth!, height: entity.previewHeight!
+          }));
+          return { previewX: pb.x, previewY: pb.y, previewWidth: pb.width, previewHeight: pb.height };
+        }
+        return {};
+      })()
+    };
+    const compositeItem: CadImportWidgetItem<TWidgetInfo> = {
+      id: UNMAPPED_COMPOSITE_ID,
+      entityIds: unmappedEntities.map(e => e.id),
+      entity: compositeEntity,
+      mapping: null
+    };
+    return [compositeItem, ...items];
+  }
+
   return items;
+}
+
+function unionPreviewBoundsOf(entities: CadImportWidgetEntity[]): { x: number; y: number; width: number; height: number } {
+  if (entities.every(hasPreviewBounds)) {
+    return unionBounds(entities, entity => ({
+      x: entity.previewX!, y: entity.previewY!,
+      width: entity.previewWidth!, height: entity.previewHeight!
+    }));
+  }
+  return unionBounds(entities, entity => ({
+    x: entity.x, y: entity.y, width: entity.width, height: entity.height
+  }));
 }
 
 export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetConfigDefaultsInput): Record<string, any> {
@@ -170,13 +295,6 @@ export interface CadGridBounds {
   sizeY: number;
 }
 
-interface CadEntityBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 export function expandCadGridBounds(bounds: CadGridBounds,
                                     targetColumns: number,
                                     targetRows: number,
@@ -194,7 +312,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]): CadImportWidgetEntity {
-  const modelBounds = unionEntityBounds(entities, entity => ({
+  const modelBounds = unionBounds(entities, entity => ({
     x: entity.x,
     y: entity.y,
     width: entity.width,
@@ -202,7 +320,7 @@ function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]):
   }));
   const previewEntities = entities.filter(hasPreviewBounds);
   const previewBounds = previewEntities.length === entities.length
-    ? unionEntityBounds(previewEntities, entity => ({
+    ? unionBounds(previewEntities, entity => ({
         x: entity.previewX!,
         y: entity.previewY!,
         width: entity.previewWidth!,
@@ -225,33 +343,4 @@ function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]):
       previewHeight: previewBounds.height
     } : {})
   };
-}
-
-function unionEntityBounds<T>(
-  entities: T[],
-  boundsProvider: (entity: T) => CadEntityBounds
-): CadEntityBounds {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const entity of entities) {
-    const bounds = boundsProvider(entity);
-    minX = Math.min(minX, bounds.x);
-    minY = Math.min(minY, bounds.y);
-    maxX = Math.max(maxX, bounds.x + bounds.width);
-    maxY = Math.max(maxY, bounds.y + bounds.height);
-  }
-  return {
-    x: minX,
-    y: minY,
-    width: Math.max(maxX - minX, 1),
-    height: Math.max(maxY - minY, 1)
-  };
-}
-
-function hasPreviewBounds(entity: CadImportWidgetEntity): boolean {
-  return Number.isFinite(entity.previewX) && Number.isFinite(entity.previewY) &&
-    Number.isFinite(entity.previewWidth) && Number.isFinite(entity.previewHeight) &&
-    entity.previewWidth! > 0 && entity.previewHeight! > 0;
 }

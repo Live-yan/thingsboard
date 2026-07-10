@@ -74,7 +74,7 @@
           <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="keepSelected()">
             {{ 'dashboard.cad-import-dialog.keep-selected' | translate }}
           </button>
-          <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size < 2" (click)="mapSelectedGroup()">
+          <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size === 0" (click)="mapSelectedGroup()">
             <mat-icon>join_inner</mat-icon>
             {{ 'dashboard.cad-import-dialog.group-map-selected' | translate }}
           </button>

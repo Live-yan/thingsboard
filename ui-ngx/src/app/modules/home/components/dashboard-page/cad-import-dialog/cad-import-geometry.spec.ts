@@ -17,7 +17,9 @@
 import assert from 'node:assert/strict';
 import {
   buildPreviewCssTransform,
-  screenPointToPreviewSvgCoords
+  screenPointToPreviewSvgCoords,
+  rectContains,
+  shouldIgnoreEntityClickAfterDrag
 } from './cad-import-geometry';
 
 assert.equal(
@@ -47,3 +49,14 @@ assert.deepEqual(
     y: 2050
   }
 );
+
+const selection = { x: 10, y: 20, width: 40, height: 30 };
+
+assert.equal(rectContains(selection, { x: 20, y: 25, width: 10, height: 15 }), true);
+assert.equal(rectContains(selection, { x: 20, y: 25, width: 31, height: 15 }), false);
+assert.equal(rectContains(selection, { x: 0, y: 10, width: 60, height: 50 }), false);
+assert.equal(rectContains(selection, { x: 20, y: 25, width: 0, height: 15 }), false);
+
+assert.equal(shouldIgnoreEntityClickAfterDrag(true, { width: 6, height: 6 }), true);
+assert.equal(shouldIgnoreEntityClickAfterDrag(true, { width: 2, height: 6 }), false);
+assert.equal(shouldIgnoreEntityClickAfterDrag(false, { width: 6, height: 6 }), false);

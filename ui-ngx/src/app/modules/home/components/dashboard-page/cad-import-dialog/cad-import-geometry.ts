@@ -28,6 +28,30 @@ export interface CadSelectionHighlight extends CadRect {
   cornerRadius: number;
 }
 
+const MIN_SELECTION_DRAG_SIZE = 5;
+
+export const rectContains = (container: CadRect, candidate: CadRect): boolean => {
+  if (![container.x, container.y, container.width, container.height,
+    candidate.x, candidate.y, candidate.width, candidate.height].every(Number.isFinite) ||
+      container.width <= 0 || container.height <= 0 || candidate.width <= 0 || candidate.height <= 0) {
+    return false;
+  }
+  const containerX = Math.min(container.x, container.x + container.width);
+  const containerY = Math.min(container.y, container.y + container.height);
+  const containerRight = Math.max(container.x, container.x + container.width);
+  const containerBottom = Math.max(container.y, container.y + container.height);
+  return candidate.x >= containerX && candidate.y >= containerY &&
+    candidate.x + candidate.width <= containerRight &&
+    candidate.y + candidate.height <= containerBottom;
+};
+
+export const shouldIgnoreEntityClickAfterDrag = (
+  selectionMoved: boolean,
+  selectionSize: Pick<CadRect, 'width' | 'height'>
+): boolean => selectionMoved &&
+  Number.isFinite(selectionSize.width) && Number.isFinite(selectionSize.height) &&
+  selectionSize.width > MIN_SELECTION_DRAG_SIZE && selectionSize.height > MIN_SELECTION_DRAG_SIZE;
+
 const SELECTION_STROKE_WIDTH = 2;
 const SELECTION_DASHARRAY = '6,4';
 const SELECTION_CORNER_RADIUS = 2;

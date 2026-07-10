@@ -43,7 +43,9 @@ import {
   buildPreviewCssTransform,
   buildSelectionHighlight,
   CadRect,
-  screenPointToPreviewSvgCoords
+  rectContains,
+  screenPointToPreviewSvgCoords,
+  shouldIgnoreEntityClickAfterDrag
 } from './cad-import-geometry';
 import {
   buildCadImportWidgetItems,
@@ -113,6 +115,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private deletedMasks: Map<string, Rect> = new Map<string, Rect>();
   private previewRendered = false;
   private isDragging = false;
+  private selectionMoved = false;
+  private suppressNextEntityClick = false;
   private selectionRect: any = null;
   private scadaSymbolWidgetType$: Observable<WidgetType> | null = null;
 
@@ -287,6 +291,10 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       g.classList.add('cad-entity');
       g.addEventListener('click', (event: Event) => {
         event.stopPropagation();
+        if (this.suppressNextEntityClick) {
+          this.suppressNextEntityClick = false;
+          return;
+        }
         if (this.previewMode === 'map') {
           const entity = this.result?.manifest.find(e => e.id === entityId);
           if (entity) this.mapEntityFromPreview(entity);
@@ -385,6 +393,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     const y = Math.min(startCoords.y, svgCoords.y);
     const w = Math.abs(svgCoords.x - startCoords.x);
     const h = Math.abs(svgCoords.y - startCoords.y);
+    this.selectionMoved = this.selectionMoved || w > 2 || h > 2;
     this.selectionRect.move(x, y).size(w, h);
   }
 
@@ -405,12 +414,14 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     const selW = Math.abs(svgCoords.x - startCoords.x);
     const selH = Math.abs(svgCoords.y - startCoords.y);
 
-    if (selW > 5 && selH > 5) {
+    if (shouldIgnoreEntityClickAfterDrag(this.selectionMoved, { width: selW, height: selH })) {
       this.selectEntitiesInRect(selX, selY, selW, selH);
+      this.suppressNextEntityClick = true;
     }
 
     this.selectionRect.remove();
     this.selectionRect = null;
+    this.selectionMoved = false;
   }
 
   zoomIn(): void {
@@ -437,9 +448,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     if (!this.svgCanvas) return;
 
     this.svgCanvas.on('mousedown', (event: MouseEvent) => {
-      if ((event.target as HTMLElement).closest('.cad-entity')) return;
       if (event.ctrlKey || event.button !== 0) return;
       this.isDragging = true;
+      this.selectionMoved = false;
       this.dragScreenStartX = event.clientX;
       this.dragScreenStartY = event.clientY;
       const svgCoords = this.toSvgCoords(event.clientX, event.clientY);
@@ -458,8 +469,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     this.selectedEntityIds.clear();
     for (const [id, group] of this.entityGroups) {
       const bbox = this.entitySelectionBounds(id, group);
-      if (bbox && bbox.x < x + w && bbox.x + bbox.width > x &&
-          bbox.y < y + h && bbox.y + bbox.height > y) {
+      if (bbox && rectContains({ x, y, width: w, height: h }, bbox)) {
         this.selectedEntityIds.add(id);
       }
     }
@@ -610,18 +620,22 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     const selectedIds = this.sortEntityIdsByManifest(
       Array.from(this.selectedEntityIds).filter(id => !this.deletedEntityIds.has(id))
     );
-    if (selectedIds.length < 2) {
+    if (selectedIds.length === 0) {
       return;
     }
     this.openWidgetSelectDialog(widgetInfo => {
       const selectedIdSet = new Set(selectedIds);
       this.removeGroupsContaining(selectedIdSet);
-      selectedIds.forEach(id => this.mappings.delete(id));
-      this.groupMappings.push({
-        id: this.utils.guid(),
-        entityIds: selectedIds,
-        widgetInfo
-      });
+      if (selectedIds.length === 1) {
+        this.mappings.set(selectedIds[0], widgetInfo);
+      } else {
+        selectedIds.forEach(id => this.mappings.delete(id));
+        this.groupMappings.push({
+          id: this.utils.guid(),
+          entityIds: selectedIds,
+          widgetInfo
+        });
+      }
       this.selectedEntityIds.clear();
       this.updateSelectionVisuals();
       this.updateMappingVisuals();

@@ -87,6 +87,10 @@ public class EdgeEventSourcingListener {
             log.trace("Ignoring event {}", event);
             return;
         }
+        if (!hasEdgeSynchronizationContext()) {
+            log.trace("Ignoring SaveEntityEvent because no Edge synchronization context is active: {}", event);
+            return;
+        }
 
         try {
             if (!isValidSaveEntityEventForEdgeProcessing(event)) {
@@ -106,6 +110,10 @@ public class EdgeEventSourcingListener {
 
     @TransactionalEventListener(fallbackExecution = true)
     public void handleEvent(DeleteEntityEvent<?> event) {
+        if (!hasEdgeSynchronizationContext()) {
+            log.trace("Ignoring DeleteEntityEvent because no Edge synchronization context is active: {}", event);
+            return;
+        }
         TenantId tenantId = event.getTenantId();
         EntityType entityType = event.getEntityId().getEntityType();
         if (!tenantId.isSysTenantId() && !tenantService.tenantExists(tenantId)) {
@@ -138,6 +146,10 @@ public class EdgeEventSourcingListener {
 
     @TransactionalEventListener(fallbackExecution = true)
     public void handleEvent(ActionEntityEvent<?> event) {
+        if (!hasEdgeSynchronizationContext()) {
+            log.trace("Ignoring ActionEntityEvent because no Edge synchronization context is active: {}", event);
+            return;
+        }
         if (EntityType.DEVICE.equals(event.getEntityId().getEntityType()) && ActionType.ASSIGNED_TO_TENANT.equals(event.getActionType())) {
             return;
         }
@@ -167,6 +179,10 @@ public class EdgeEventSourcingListener {
 
     @TransactionalEventListener(fallbackExecution = true)
     public void handleEvent(RelationActionEvent event) {
+        if (!hasEdgeSynchronizationContext()) {
+            log.trace("Ignoring RelationActionEvent because no Edge synchronization context is active: {}", event);
+            return;
+        }
         try {
             TenantId tenantId = event.getTenantId();
             if (ActionType.RELATION_DELETED.equals(event.getActionType()) && !tenantService.tenantExists(tenantId)) {
@@ -237,6 +253,11 @@ public class EdgeEventSourcingListener {
         }
         // Default: If the entity doesn't match any of the conditions, consider it as valid.
         return true;
+    }
+
+    private boolean hasEdgeSynchronizationContext() {
+        ThreadLocal<?> edgeId = edgeSynchronizationManager.getEdgeId();
+        return edgeId != null && edgeId.get() != null;
     }
 
     private void cleanUpUserAdditionalInfo(User user) {

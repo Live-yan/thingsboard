@@ -61,6 +61,7 @@ assert.deepEqual(
   }),
   {
     title: 'Extra long horizontal pipe',
+    cadImport: true,
     showTitle: false,
     dropShadow: false,
     resizable: true,

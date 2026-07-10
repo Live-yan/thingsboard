@@ -41,6 +41,7 @@ import {
   widgetDatasourcesHasOnlyComparisonAggregation,
   widgetHasTimewindow
 } from '@shared/models/widget/widget-model.definition';
+import { dashboardWidgetResizePolicy } from './dashboard-widget-editing';
 
 export interface WidgetsData {
   widgets: Array<Widget>;
@@ -412,9 +413,7 @@ export class DashboardWidget implements GridsterItem, IDashboardWidget {
   set gridsterItemComponent(item: GridsterItemComponentInterface) {
     this.gridsterItemComponentValue = item;
 
-    if (this.widgetLayout?.preserveAspectRatio) {
-      this.applyPreserveAspectRatio(item);
-    }
+    this.applyPreserveAspectRatio(item);
 
     this.gridsterItemComponentSubject.next(this.gridsterItemComponentValue);
     this.gridsterItemComponentSubject.complete();
@@ -423,16 +422,9 @@ export class DashboardWidget implements GridsterItem, IDashboardWidget {
   private preserveAspectRatioApplied = false;
 
   private applyPreserveAspectRatio(item: GridsterItemComponentInterface) {
-
-    if (this.widgetLayout?.preserveAspectRatio) {
-      this.resizableHandles.ne = false;
-      this.resizableHandles.sw = false;
-      this.resizableHandles.nw = false;
-    } else {
-      this.resizableHandles.ne = true;
-      this.resizableHandles.sw = true;
-      this.resizableHandles.nw = true;
-    }
+    const resizePolicy = dashboardWidgetResizePolicy(this.widget, this.widgetLayout);
+    this.resizeEnabled = resizePolicy.resizeEnabled && this.widgetLayout?.resizable !== false;
+    this.resizableHandles = resizePolicy.resizableHandles;
 
     if (!this.preserveAspectRatioApplied) {
       const $item = item.$item;

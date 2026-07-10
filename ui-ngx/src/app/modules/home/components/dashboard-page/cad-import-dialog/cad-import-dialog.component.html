@@ -105,6 +105,22 @@
     }
     @case ('map') {
       <div class="map-step">
+        <div class="mapping-scheme-toolbar">
+          <mat-form-field appearance="outline" class="mapping-scheme-name">
+            <mat-label>{{ 'dashboard.cad-import-dialog.mapping-scheme-name' | translate }}</mat-label>
+            <input matInput [(ngModel)]="mappingSchemeName"
+                   [placeholder]="'dashboard.cad-import-dialog.mapping-scheme-placeholder' | translate">
+          </mat-form-field>
+          <button mat-stroked-button color="primary" (click)="saveMappingScheme()">
+            <mat-icon>save</mat-icon>
+            {{ 'dashboard.cad-import-dialog.save-mapping-scheme' | translate }}
+          </button>
+          @if (mappingSchemeStatus) {
+            <span class="mapping-scheme-status">
+              {{ ('dashboard.cad-import-dialog.mapping-scheme-' + mappingSchemeStatus) | translate: { name: mappingSchemeName } }}
+            </span>
+          }
+        </div>
         <p class="map-hint">{{ 'dashboard.cad-import-dialog.map-hint' | translate }}</p>
         <div class="entity-list">
           @for (group of mappedGroups; track group.id) {

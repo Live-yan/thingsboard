@@ -18,6 +18,7 @@ import { AfterViewChecked, ChangeDetectorRef, Component, ElementRef, Inject, OnD
 import { MAT_DIALOG_DATA, MatDialog, MatDialogRef } from '@angular/material/dialog';
 import { Store } from '@ngrx/store';
 import { AppState } from '@core/core.state';
+import { LocalStorageService } from '@core/local-storage/local-storage.service';
 import { Router } from '@angular/router';
 import { DialogComponent } from '@shared/components/dialog.component';
 import { CadPerEntityResult, CadEntityInfo, PreviewTransform } from '@shared/models/cad-per-entity.models';
@@ -56,6 +57,13 @@ import {
   expandCadGridBounds
 } from './cad-import-widget-generation';
 import { buildDeletedPreviewMask } from './cad-import-preview-visibility';
+import {
+  applyCadMappingScheme,
+  CAD_MAPPING_SCHEME_STORAGE_KEY,
+  CadMappingScheme,
+  createCadMappingScheme,
+  loadCadMappingScheme
+} from './cad-import-mapping-scheme';
 
 export interface CadImportDialogData {
   dashboard: any;
@@ -100,6 +108,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   keptEntities: CadEntityInfo[] = [];
   mappings: Map<string, WidgetInfo | null> = new Map<string, WidgetInfo | null>();
   groupMappings: CadEntityGroupMapping[] = [];
+  mappingSchemeName = '';
+  mappingSchemeStatus: 'loaded' | 'saved' | 'error' | null = null;
   selectedEntityIds: Set<string> = new Set<string>();
   deletedEntityIds: Set<string> = new Set<string>();
   errorMessage = '';
@@ -116,7 +126,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private previewRendered = false;
   private isDragging = false;
   private selectionMoved = false;
-  private suppressNextEntityClick = false;
+  private suppressNextEntityClickId: string | null = null;
+  private dragStartEntityId: string | null = null;
   private selectionRect: any = null;
   private scadaSymbolWidgetType$: Observable<WidgetType> | null = null;
 
@@ -141,6 +152,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     private dialog: MatDialog,
     private translate: TranslateService,
     private imageService: ImageService,
+    private localStorageService: LocalStorageService,
     private cd: ChangeDetectorRef,
   ) {
     super(store, router, dialogRef);
@@ -203,8 +215,41 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     this.deletedMaskLayer = null;
     this.mappings.clear();
     this.groupMappings = [];
+    const mappingScheme = this.readMappingScheme();
+    this.mappingSchemeName = mappingScheme?.name || '';
+    this.mappingSchemeStatus = mappingScheme ? 'loaded' : null;
+    if (mappingScheme) {
+      const application = applyCadMappingScheme(this.keptEntities, mappingScheme);
+      this.groupMappings = application.groupMappings;
+      application.entityMappings.forEach((widgetInfo, entityId) => this.mappings.set(entityId, widgetInfo));
+    }
     this.previewRendered = false;
     this.step = 'preview';
+  }
+
+  private readMappingScheme(): CadMappingScheme | null {
+    try {
+      return loadCadMappingScheme(this.localStorageService.getItem(CAD_MAPPING_SCHEME_STORAGE_KEY));
+    } catch {
+      return null;
+    }
+  }
+
+  saveMappingScheme(): void {
+    const entities = this.keptEntities.filter(entity => !this.deletedEntityIds.has(entity.id));
+    const scheme = createCadMappingScheme(
+      this.mappingSchemeName,
+      entities,
+      this.mappings,
+      this.activeGroupMappings()
+    );
+    try {
+      this.localStorageService.setItem(CAD_MAPPING_SCHEME_STORAGE_KEY, scheme);
+      this.mappingSchemeName = scheme.name;
+      this.mappingSchemeStatus = 'saved';
+    } catch {
+      this.mappingSchemeStatus = 'error';
+    }
   }
 
   private computeCadBounds(): void {
@@ -291,8 +336,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       g.classList.add('cad-entity');
       g.addEventListener('click', (event: Event) => {
         event.stopPropagation();
-        if (this.suppressNextEntityClick) {
-          this.suppressNextEntityClick = false;
+        const suppressClick = this.suppressNextEntityClickId === entityId;
+        this.suppressNextEntityClickId = null;
+        if (suppressClick) {
           return;
         }
         if (this.previewMode === 'map') {
@@ -416,12 +462,21 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
     if (shouldIgnoreEntityClickAfterDrag(this.selectionMoved, { width: selW, height: selH })) {
       this.selectEntitiesInRect(selX, selY, selW, selH);
-      this.suppressNextEntityClick = true;
+      if (this.dragStartEntityId) {
+        const draggedEntityId = this.dragStartEntityId;
+        this.suppressNextEntityClickId = draggedEntityId;
+        setTimeout(() => {
+          if (this.suppressNextEntityClickId === draggedEntityId) {
+            this.suppressNextEntityClickId = null;
+          }
+        });
+      }
     }
 
     this.selectionRect.remove();
     this.selectionRect = null;
     this.selectionMoved = false;
+    this.dragStartEntityId = null;
   }
 
   zoomIn(): void {
@@ -451,6 +506,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       if (event.ctrlKey || event.button !== 0) return;
       this.isDragging = true;
       this.selectionMoved = false;
+      this.dragStartEntityId = (event.target as Element | null)
+        ?.closest('.cad-entity')?.getAttribute('data-cad-entity-id') || null;
       this.dragScreenStartX = event.clientX;
       this.dragScreenStartY = event.clientY;
       const svgCoords = this.toSvgCoords(event.clientX, event.clientY);
@@ -611,8 +668,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       return;
     }
     this.openWidgetSelectDialog(widgetInfo => {
-      this.mappings.set(entity.id, widgetInfo);
-      this.updateMappingVisuals();
+      this.assignWidget(entity, widgetInfo);
     });
   }
 
@@ -664,8 +720,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       return;
     }
     this.openWidgetSelectDialog(widgetInfo => {
-      this.mappings.set(entity.id, widgetInfo);
-      this.updateMappingVisuals();
+      this.assignWidget(entity, widgetInfo);
     });
   }
 
@@ -683,6 +738,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   assignWidget(entity: CadEntityInfo, widgetInfo: WidgetInfo | null): void {
+    this.removeGroupsContaining(new Set([entity.id]));
     this.mappings.set(entity.id, widgetInfo);
     this.updateMappingVisuals();
   }
@@ -966,7 +1022,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
             config: mergeDeep({} as any, defaultConfig, cadMappedScadaWidgetConfigDefaults({
               title: mapping.title,
               type: mapping.type,
-              preserveAspectRatio: false
+              preserveAspectRatio: false,
+              stretchToFit: true
             }))
           };
           return this.dashboardUtils.validateAndUpdateWidget(widget);

@@ -123,6 +123,7 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(
 export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetConfigDefaultsInput): Record<string, any> {
   const config: Record<string, any> = {
     title: input.title,
+    cadImport: true,
     showTitle: false,
     dropShadow: false,
     resizable: true,

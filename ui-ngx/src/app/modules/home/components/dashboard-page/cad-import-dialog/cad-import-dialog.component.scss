@@ -138,6 +138,23 @@
   justify-content: flex-start;
 }
 
+.mapping-scheme-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+
+  .mapping-scheme-name {
+    flex: 1;
+    margin-bottom: -1.25em;
+  }
+
+  .mapping-scheme-status {
+    opacity: 0.7;
+    white-space: nowrap;
+  }
+}
+
 .map-hint {
   text-align: center;
   opacity: 0.7;

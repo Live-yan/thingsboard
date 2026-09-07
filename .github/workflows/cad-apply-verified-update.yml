@@ -1,0 +1,67 @@
+name: Apply verified CAD PR update
+on:
+  push:
+    branches: [fix/cad-scene-deletion-parity]
+    paths: [.github/workflows/cad-apply-verified-update.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'Live-yan/thingsboard' && github.ref == 'refs/heads/fix/cad-scene-deletion-parity' && github.actor == 'Live-yan'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 8
+      - name: Check immutable patch and base; apply only reviewed source paths
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, lzma, subprocess
+          base = 'fcb74330b34400a99312b1fbff7abaf9119dea6a'
+          staging = '.github/cad-update-20260907/'
+          workflow = '.github/workflows/cad-apply-verified-update.yml'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          existing = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          assert all(path.startswith(staging) or path == workflow for path in existing), 'PR changed after the reviewed base'
+          hashes = [
+              '023b5c5509c748e57ba25e8df2bea7a82fcd8f521bfa1fd904048caf4678b86a',
+              'dbc77f5c87d9637a7a37790a6eee31dc8bd271df5f9a7b67822bd2ebb90190ea',
+              '8a15ae6d5cb8d88f23c0ef171afe8165e55c703d6873f0b527cb5f0684a5d432',
+              '1b5df7bd6d8e1ea20b7d9fefca755acdd6238b5b6ac0de2f40d24bb121a80d26'
+          ]
+          parts = []
+          for i, expected in enumerate(hashes):
+              part = Path(staging + f'part-{i}.b64').read_bytes().strip()
+              assert hashlib.sha256(part).hexdigest() == expected, f'Part {i} checksum mismatch'
+              parts.append(part)
+          patch = lzma.decompress(base64.b64decode(b''.join(parts), validate=True), memlimit=256*1024*1024)
+          assert hashlib.sha256(patch).hexdigest() == '39105d1d822599f93bbaa77514eb2ec2e4d9c31a583d4c3220afa03c18cd4521'
+          subprocess.run(['git', 'apply', '--check', '--index', '--unidiff-zero', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '-'], input=patch, check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          prefixes = (
+              'application/src/main/data/scripts/cad/',
+              'application/src/main/java/org/thingsboard/server/service/entitiy/cad/',
+              'ui-ngx/src/app/modules/home/components/dashboard-page/cad-import-dialog/',
+              'tests/cad/'
+          )
+          allowed = {
+              'application/src/main/java/org/thingsboard/server/config/CadConfig.java',
+              'application/src/main/java/org/thingsboard/server/controller/CadController.java',
+              'application/src/main/resources/thingsboard.yml',
+              'ui-ngx/src/app/shared/models/cad-per-entity.models.ts',
+              'ui-ngx/src/app/shared/import-export/import-export.service.ts',
+              'docs/cad-import-review.md'
+          }
+          assert changed and all(path in allowed or path.startswith(prefixes) for path in changed), 'Unexpected changed path'
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          subprocess.run(['git', 'rm', '-r', '--', staging], check=True)
+          PY
+      - name: Commit to the PR branch without force pushing
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(cad): canonical instance scene, persisted deletions and bounded large-file processing'
+          git push origin HEAD:refs/heads/fix/cad-scene-deletion-parity

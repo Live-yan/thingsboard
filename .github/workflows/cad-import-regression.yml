@@ -14,17 +14,14 @@
 # limitations under the License.
 #
 name: CAD import regression
-
 on:
   pull_request:
     paths:
       - 'application/src/main/data/scripts/cad/**'
       - 'application/src/main/java/org/thingsboard/server/service/entitiy/cad/**'
       - 'application/src/main/java/org/thingsboard/server/controller/CadController.java'
-      - 'ui-ngx/src/app/modules/home/components/dashboard-page/**'
-      - 'ui-ngx/src/app/shared/models/cad*'
-      - 'ui-ngx/src/app/core/services/dashboard-utils.service.ts'
-      - 'ui-ngx/src/app/modules/home/components/widget/lib/scada/**'
+      - 'application/src/main/java/org/thingsboard/server/config/CadConfig.java'
+      - 'ui-ngx/src/**'
       - 'tests/cad/**'
       - '.github/workflows/cad-import-regression.yml'
   push:
@@ -35,14 +32,11 @@ on:
       - 'tests/cad/**'
       - '.github/workflows/cad-import-regression.yml'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: cad-import-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   cad-regression:
     runs-on: ubuntu-24.04
@@ -53,6 +47,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Collect reproducible CAD regression inputs
+        run: |
+          mkdir -p cad-test-artifacts
+          git archive --format=tar.gz -o cad-test-artifacts/inputs.tar.gz HEAD \
+            application/src/main/data/scripts/cad \
+            application/src/main/java/org/thingsboard/server/service/entitiy/cad \
+            application/src/main/java/org/thingsboard/server/controller/CadController.java \
+            application/src/main/java/org/thingsboard/server/config/CadConfig.java \
+            application/src/main/resources/thingsboard.yml \
+            ui-ngx/src ui-ngx/tsconfig.json ui-ngx/tsconfig.app.json ui-ngx/package.json \
+            ui-ngx/angular.json tests/cad docs/cad-import-review.md \
+            .github/workflows/cad-import-regression.yml
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -60,9 +66,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install isolated CAD test tools
-        shell: bash
         run: |
-          set -euo pipefail
           python -m pip install ezdxf==1.4.4 Pillow==11.3.0 pytest==9.0.2 playwright==1.57.0
           python -m playwright install --with-deps chromium
           npm install --prefix "$RUNNER_TEMP/cad-tools" --no-audit --no-fund typescript@5.9.3 ts-node@10.9.2 tslib@2.8.1
@@ -71,17 +75,21 @@ jobs:
       - name: Existing Python converter regressions
         run: python -m unittest discover -s application/src/main/data/scripts/cad/tests -v
       - name: All standalone CAD TypeScript specifications
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           directory=ui-ngx/src/app/modules/home/components/dashboard-page/cad-import-dialog
           mapfile -t specs < <(find "$directory" -name 'cad*.spec.ts' -type f | sort)
           test "${#specs[@]}" -gt 0
+          failed=0
           for spec in "${specs[@]}"; do
             echo "Running $spec"
-            ts-node --transpile-only --compiler-options '{"module":"CommonJS","moduleResolution":"node","target":"es2020","esModuleInterop":true}' "$spec"
+            ts-node --transpile-only --compiler-options '{"module":"CommonJS","moduleResolution":"node","target":"es2020","esModuleInterop":true}' "$spec" || failed=1
           done
+          exit "$failed"
       - name: Browser scene and real DXF contract regressions
+        if: ${{ !cancelled() }}
         run: python -m pytest -q tests/cad --junitxml=cad-test-artifacts/results.xml
       - uses: actions/upload-artifact@v4
         if: always()

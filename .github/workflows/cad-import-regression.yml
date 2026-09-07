@@ -56,7 +56,7 @@ jobs:
             application/src/main/java/org/thingsboard/server/controller/CadController.java \
             application/src/main/java/org/thingsboard/server/config/CadConfig.java \
             application/src/main/resources/thingsboard.yml \
-            ui-ngx/src ui-ngx/tsconfig.json ui-ngx/tsconfig.app.json ui-ngx/package.json \
+            ui-ngx/src ui-ngx/tsconfig.json ui-ngx/package.json \
             ui-ngx/angular.json tests/cad docs/cad-import-review.md \
             .github/workflows/cad-import-regression.yml
       - uses: actions/setup-python@v5
@@ -66,6 +66,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install isolated CAD test tools
+        id: tools
         run: |
           python -m pip install ezdxf==1.4.4 Pillow==11.3.0 pytest==9.0.2 playwright==1.57.0
           python -m playwright install --with-deps chromium
@@ -75,7 +76,7 @@ jobs:
       - name: Existing Python converter regressions
         run: python -m unittest discover -s application/src/main/data/scripts/cad/tests -v
       - name: All standalone CAD TypeScript specifications
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -89,7 +90,7 @@ jobs:
           done
           exit "$failed"
       - name: Browser scene and real DXF contract regressions
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         run: python -m pytest -q tests/cad --junitxml=cad-test-artifacts/results.xml
       - uses: actions/upload-artifact@v4
         if: always()

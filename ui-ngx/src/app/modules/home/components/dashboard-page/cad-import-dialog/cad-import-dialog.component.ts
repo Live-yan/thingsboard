@@ -57,6 +57,7 @@ import {
   expandCadGridBounds
 } from './cad-import-widget-generation';
 import { buildCadSvgSceneAsync, decodeCadSvg } from './cad-import-svg';
+import { cadBoundsToGrid, cadGridFrame } from './cad-import-grid';
 import { CadSceneState, CadSceneSnapshot } from './cad-scene-state';
 import {
   applyCadMappingScheme,
@@ -84,7 +85,6 @@ type CadEntityGroupMapping = CadImportGroupMapping<WidgetInfo>;
 
 const VIEWPORT_WIDTH = 1200;
 const VIEWPORT_HEIGHT = 700;
-const TARGET_GRID_COLUMNS = 1000;
 const MIN_CAD_VISUAL_WIDGET_SIZE_X = 4;
 const MIN_CAD_VISUAL_WIDGET_SIZE_Y = 4;
 const SCADA_SYMBOL_FQN = 'system.scada_symbol';
@@ -119,6 +119,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private summary: { groups: CadEntityGroupMapping[]; entities: CadEntityInfo[]; groupedIds: Set<string>; mapped: number } | null = null;
   savedEdits: CadSceneSnapshot | null = null;
   sceneWarning = '';
+  conversionWarnings: { type: string; handle: string; reason: string }[] = [];
+  fidelityAcknowledged = false;
   pageIndex = 0;
   readonly pageSize = 50;
   get keptEntities(): CadEntityInfo[] { return this.scene?.keptEntities || []; }
@@ -247,6 +249,8 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     this.clearThumbnails();
     this.widgetTypes.clear();
     this.sceneWarning = '';
+    this.conversionWarnings = (result.warnings || []).slice(0, 100);
+    this.fidelityAcknowledged = false;
     this.pageIndex = 0;
     if (result.manifest.length === 0) {
       this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.no-entities');
@@ -365,7 +369,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       // Preview the exact assets that will be imported, not a separately rendered
       // full drawing plus hitboxes. Rebuilding also reapplies all deletions.
       outerSvg = await this.zone.runOutsideAngular(() => buildCadSvgSceneAsync(
-        this.keptEntities, frame, this.deletedEntityIds, { signal: processing.signal }));
+        this.keptEntities, frame, this.deletedEntityIds, { signal: processing.signal, backgroundColor: this.result?.backgroundColor || '#ffffff' }));
       if (processing.signal.aborted) return;
     } catch (error) {
       if (processing.signal.aborted) return;
@@ -910,37 +914,15 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   private scaleCadToGrid(entity: CadEntityInfo | CadImportWidgetEntity): { col: number; row: number; sizeX: number; sizeY: number } {
-    if (this.previewTransform && entity.previewX !== undefined && entity.previewY !== undefined &&
-        entity.previewWidth !== undefined && entity.previewHeight !== undefined) {
-      const t = this.previewTransform;
-      const targetCols = TARGET_GRID_COLUMNS;
-      const targetRows = Math.max(1, Math.round(targetCols * (t.height / t.width)));
-      const col = Math.floor(((entity.previewX - t.x) / t.width) * targetCols);
-      const row = Math.floor(((entity.previewY - t.y) / t.height) * targetRows);
-      const sizeX = Math.max(1, Math.ceil((entity.previewWidth / t.width) * targetCols));
-      const sizeY = Math.max(1, Math.ceil((entity.previewHeight / t.height) * targetRows));
-      return {
-        col: Math.max(0, Math.min(col, targetCols - sizeX)),
-        row: Math.max(0, Math.min(row, targetRows - sizeY)),
-        sizeX: Math.min(sizeX, targetCols),
-        sizeY: Math.min(sizeY, targetRows)
-      };
-    }
-    if (!this.cadBounds) {
-      return { col: 0, row: 0, sizeX: 1, sizeY: 1 };
-    }
-    const targetCols = TARGET_GRID_COLUMNS;
-    const targetRows = Math.max(1, Math.round(targetCols * (this.cadBounds.height / this.cadBounds.width)));
-    const col = Math.floor(((entity.x - this.cadBounds.minX) / this.cadBounds.width) * targetCols);
-    const row = Math.floor(((this.cadBounds.maxY - (entity.y + entity.height)) / this.cadBounds.height) * targetRows);
-    const sizeX = Math.max(1, Math.ceil((entity.width / this.cadBounds.width) * targetCols));
-    const sizeY = Math.max(1, Math.ceil((entity.height / this.cadBounds.height) * targetRows));
-    return {
-      col: Math.max(0, Math.min(col, targetCols - sizeX)),
-      row: Math.max(0, Math.min(row, targetRows - sizeY)),
-      sizeX: Math.min(sizeX, targetCols),
-      sizeY: Math.min(sizeY, targetRows)
-    };
+    return cadBoundsToGrid({
+      x: entity.previewX!, y: entity.previewY!, width: entity.previewWidth!, height: entity.previewHeight!
+    }, this.targetGrid());
+  }
+
+  private targetGrid() {
+    const frame = this.derivePreviewViewBox();
+    if (!frame) throw new Error('CAD scene transform is missing. Please convert the drawing again.');
+    return cadGridFrame(frame);
   }
 
   private cachedWidgetType(fqn: string): Observable<WidgetType> {
@@ -991,17 +973,12 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     );
   }
 
-  private targetGridRows(): number {
-    const aspectRatio = this.previewTransform
-      ? this.previewTransform.height / this.previewTransform.width
-      : (this.cadBounds ? this.cadBounds.height / this.cadBounds.width : 1);
-    return Math.max(1, Math.round(TARGET_GRID_COLUMNS * aspectRatio));
-  }
+  private targetGridRows(): number { return this.targetGrid().rows; }
 
   private createScadaSymbolWidget(entity: CadEntityInfo | CadImportWidgetEntity, scadaSymbolUrl: string, scadaWidgetType: WidgetType): Widget {
     const { col, row, sizeX, sizeY } = expandCadGridBounds(
       this.scaleCadToGrid(entity),
-      TARGET_GRID_COLUMNS,
+      this.targetGrid().columns,
       this.targetGridRows(),
       MIN_CAD_VISUAL_WIDGET_SIZE_X,
       MIN_CAD_VISUAL_WIDGET_SIZE_Y
@@ -1019,7 +996,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         title: this.scadaSymbolTitle(entity),
         type: scadaWidgetType.descriptor.type || widgetType.rpc,
         preserveAspectRatio: true,
-        stretchToFit: true,
+        stretchToFit: false,
         scadaSymbolUrl
       }))
     };
@@ -1029,7 +1006,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private createWidgetForEntity(entity: CadEntityInfo | CadImportWidgetEntity, mapping: WidgetInfo | null): Observable<Widget> {
     const { col, row, sizeX, sizeY } = expandCadGridBounds(
       this.scaleCadToGrid(entity),
-      TARGET_GRID_COLUMNS,
+      this.targetGrid().columns,
       this.targetGridRows(),
       MIN_CAD_VISUAL_WIDGET_SIZE_X,
       MIN_CAD_VISUAL_WIDGET_SIZE_Y
@@ -1090,8 +1067,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       deletedEntityIds: this.deletedEntityIds,
       entityMappings: this.mappings,
       groupMappings: this.activeGroupMappings(),
-      previewViewBox
-    }, { signal: processing.signal }))).pipe(
+      previewViewBox: this.targetGrid().viewBox,
+      backgroundColor: this.result?.backgroundColor || '#ffffff'
+    }, { signal: processing.signal, backgroundColor: this.result?.backgroundColor || '#ffffff' }))).pipe(
       switchMap(widgetItems => {
         this.importTotal = cadImportWidgetPlan({ importEntityCount: widgetItems.length }).totalWorkItems;
         this.importProgress = 0;
@@ -1114,7 +1092,11 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
               .map(result => result.widget).filter((widget): widget is Widget => !!widget);
             // Saved/exported with the actual retained SVG resource, without
             // duplicating the CAD geometry in every widget configuration.
-            if (widgets.length) Object.assign(widgets[0].config, { cadSceneEdits: snapshot });
+            if (widgets.length) Object.assign(widgets[0].config, {
+              cadSceneEdits: snapshot,
+              cadConversionWarnings: this.conversionWarnings,
+              cadFidelityAcknowledged: this.fidelityAcknowledged
+            });
             return widgets;
           })
         );
@@ -1124,6 +1106,10 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   }
 
   onImportClick(): void {
+    if (this.conversionWarnings.length && !this.fidelityAcknowledged) {
+      this.errorMessage = this.translate.instant('dashboard.cad-import-dialog.fidelity-acknowledge');
+      return;
+    }
     this.isLoading = true;
     this.errorMessage = '';
     defer(() => this.generateWidgets()).pipe(
@@ -1147,7 +1133,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         this.dialogRef.close({
           widgets,
           layoutType: 'scada',
-          targetColumns: TARGET_GRID_COLUMNS,
+          targetColumns: this.targetGrid().columns,
           cadAspectRatio: this.previewTransform
             ? this.previewTransform.height / this.previewTransform.width
             : (this.cadBounds ? this.cadBounds.height / this.cadBounds.width : undefined)
@@ -1212,7 +1198,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       case 'upload':
         return !!this.result;
       case 'preview':
-        if (this.errorMessage) return false;
+        if (this.errorMessage || (this.conversionWarnings.length && !this.fidelityAcknowledged)) return false;
         return this.result ? this.result.manifest.filter(e => !this.deletedEntityIds.has(e.id)).length > 0 : false;
       case 'map':
         return true;

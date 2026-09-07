@@ -30,6 +30,19 @@
   @if (sceneWarning) {
     <div class="warning-message" role="status">{{ sceneWarning }}</div>
   }
+  @if (conversionWarnings.length) {
+    <div role="alert">
+      <details>
+        <summary>{{ 'dashboard.cad-import-dialog.fidelity-warning' | translate: { count: conversionWarnings.length } }}</summary>
+        @for (warning of conversionWarnings; track $index) {
+          <p><strong>{{ warning.type }} {{ warning.handle }}</strong>: {{ warning.reason }}</p>
+        }
+      </details>
+      <mat-checkbox [(ngModel)]="fidelityAcknowledged" [disabled]="isLoading">
+        {{ 'dashboard.cad-import-dialog.fidelity-acknowledge' | translate }}
+      </mat-checkbox>
+    </div>
+  }
   @if (step === 'preview' && isLoading) {
     <mat-progress-bar mode="indeterminate" aria-label="Preparing CAD scene"></mat-progress-bar>
   }

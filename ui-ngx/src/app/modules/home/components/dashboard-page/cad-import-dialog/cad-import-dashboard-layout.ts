@@ -32,19 +32,19 @@ export interface CadImportLayoutContext {
   };
 }
 
-const CAD_IMPORT_ROW_HEIGHT_BASE = 50;
-
 export function applyCadImportGridSettings(layout: DashboardLayout, result: CadImportGridSettingsResult): GridSettings {
+  if (!Number.isInteger(result.targetColumns) || result.targetColumns < 1 || result.targetColumns > 1000) {
+    throw new Error('Invalid CAD grid column count');
+  }
   layout.gridSettings = layout.gridSettings || {};
   layout.gridSettings.layoutType = 'scada' as LayoutType;
   layout.gridSettings.columns = result.targetColumns;
+  // A previous SCADA minimum overrides columns in DashboardLayoutComponent.
+  layout.gridSettings.minColumns = result.targetColumns;
   layout.gridSettings.margin = 0;
   layout.gridSettings.outerMargin = false;
   layout.gridSettings.autoFillHeight = false;
-  const rowHeight = cadImportRowHeight(result.cadAspectRatio);
-  if (rowHeight !== undefined) {
-    layout.gridSettings.rowHeight = rowHeight;
-  }
+  // SCADA uses square cells; rowHeight is a mobile/list setting, not a CAD transform.
   return layout.gridSettings;
 }
 
@@ -53,10 +53,4 @@ export function syncCadImportLayoutContext(layoutCtx: CadImportLayoutContext, la
   layoutCtx.widgetLayouts = layout.widgets;
   layoutCtx.widgets.setWidgetIds(Object.keys(layout.widgets));
   layoutCtx.ctrl?.reload();
-}
-
-function cadImportRowHeight(cadAspectRatio?: number): number | undefined {
-  return typeof cadAspectRatio === 'number' && Number.isFinite(cadAspectRatio) && cadAspectRatio > 0
-    ? Math.max(1, Math.round(CAD_IMPORT_ROW_HEIGHT_BASE * cadAspectRatio))
-    : undefined;
 }

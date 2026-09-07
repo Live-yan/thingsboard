@@ -81,6 +81,7 @@ import {
 import { TbUnit } from '@shared/models/unit.models';
 import { isFiniteSvgViewBox, svgViewBoxAttribute } from '@home/components/widget/lib/scada/scada-svg-viewbox';
 import { useNativeScadaSymbolScaling } from '@home/components/widget/lib/scada/scada-symbol-sizing';
+import { prepareScadaSvgDocument, scadaSvgAspectRatio } from './scada-svg-document';
 
 export interface ScadaSymbolApi {
   generateElementId: () => string;
@@ -588,49 +589,24 @@ export class ScadaSymbolObject {
   }
 
   private prepareSvgShape(doc: XMLDocument) {
+    const root = prepareScadaSvgDocument(doc, generateElementId());
     this.nativeSvgScaling = useNativeScadaSymbolScaling(
-      doc.documentElement.getAttribute('data-cad-global-entity') === 'true',
+      root.getAttribute('data-cad-global-entity') === 'true' || root.getAttribute('data-cad-scene') === 'true' ||
+        root.getAttribute('data-cad-local-entity') === 'true',
       this.settings.stretchToFit === true
     );
-    const elements = doc.getElementsByTagName('tb:metadata');
-    for (let i=0;i<elements.length;i++) {
-      elements.item(i).remove();
-    }
-    let svgContent = doc.documentElement.innerHTML;
-    const regexp = /\sid="([^"]*)"\s/g;
-    const unique_id_suffix = '_' + generateElementId();
-    const ids: string[] = [];
-    let match = regexp.exec(svgContent);
-    while (match !== null) {
-      ids.push(match[1]);
-      match = regexp.exec(svgContent);
-    }
-    for (const id of ids) {
-      const newId = id + unique_id_suffix;
-      svgContent = svgContent.replace(new RegExp('id="'+id+'"', 'g'), 'id="'+newId+'"');
-      svgContent = svgContent.replace(new RegExp('#'+id, 'g'), '#'+newId);
-    }
-
-    this.svgShape = SVG().svg(svgContent);
+    // Keep the real root: reconstructing it from innerHTML loses inherited fill,
+    // stroke, transforms and preserveAspectRatio. Do not parse the geometry twice.
+    this.svgShape = SVG(root) as Svg;
     this.svgShape.node.style.overflow = 'hidden';
     this.svgShape.node.style.position = 'absolute';
     this.svgShape.node.style['user-select'] = 'none';
-    const origSvg = SVG(doc.documentElement.outerHTML);
-    if (origSvg.type === 'svg') {
-      this.box = (origSvg as Svg).viewbox();
-      if (origSvg.fill()) {
-        this.svgShape.fill(origSvg.fill());
-      }
-    } else {
-      this.box = this.svgShape.bbox();
-    }
-    origSvg.remove();
-    if (isFiniteSvgViewBox(this.box)) {
-      this.svgShape.attr('viewBox', svgViewBoxAttribute(this.box));
-    }
+    this.box = this.svgShape.viewbox();
+    if (!isFiniteSvgViewBox(this.box)) this.box = this.svgShape.bbox();
+    if (isFiniteSvgViewBox(this.box)) this.svgShape.attr('viewBox', svgViewBoxAttribute(this.box));
     if (this.nativeSvgScaling) {
       this.svgShape.size('100%', '100%');
-      this.svgShape.attr('preserveAspectRatio', 'none');
+      this.svgShape.attr('preserveAspectRatio', scadaSvgAspectRatio(root, this.settings.stretchToFit === true));
       this.svgShape.node.style.inset = '0';
     } else {
       this.svgShape.size(this.box.width, this.box.height);

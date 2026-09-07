@@ -198,6 +198,7 @@ function isolateEntitySvg(source: string, prefix: string): SVGSVGElement {
 export interface CadSvgBuildOptions {
   signal?: AbortSignal;
   onProgress?: (processed: number, total: number) => void;
+  backgroundColor?: string;
 }
 
 function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>): Generator<SVGGElement> {
@@ -226,16 +227,27 @@ function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>): G
   }
 }
 
-function emptyScene(viewBox: CadSvgBounds): SVGSVGElement {
+function emptyScene(viewBox: CadSvgBounds, options: CadSvgBuildOptions = {}): SVGSVGElement {
   validateCadSvgBounds(viewBox);
   const scene = document.createElementNS(SVG_NS, 'svg');
   scene.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+  scene.setAttribute('data-cad-scene', 'true');
+  scene.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  if (options.backgroundColor) {
+    if (!/^#[0-9a-f]{6}$/i.test(options.backgroundColor)) throw new Error('Invalid CAD background color.');
+    const background = document.createElementNS(SVG_NS, 'rect');
+    for (const key of ['x', 'y', 'width', 'height'] as const) background.setAttribute(key, String(viewBox[key]));
+    background.setAttribute('fill', options.backgroundColor);
+    background.setAttribute('data-cad-background', 'true');
+    background.setAttribute('pointer-events', 'none');
+    scene.appendChild(background);
+  }
   return scene;
 }
 
 export function buildCadSvgScene(entities: CadSvgEntity[], viewBox: CadSvgBounds,
-                                 deletedEntityIds: ReadonlySet<string> = new Set()): SVGSVGElement {
-  const scene = emptyScene(viewBox);
+                                 deletedEntityIds: ReadonlySet<string> = new Set(), options: CadSvgBuildOptions = {}): SVGSVGElement {
+  const scene = emptyScene(viewBox, options);
   for (const group of sceneGroups(entities, deletedEntityIds)) scene.appendChild(group);
   return scene;
 }
@@ -247,7 +259,7 @@ function checkAbort(signal?: AbortSignal): void {
 export async function buildCadSvgSceneAsync(entities: CadSvgEntity[], viewBox: CadSvgBounds,
     deletedEntityIds: ReadonlySet<string> = new Set(), options: CadSvgBuildOptions = {}): Promise<SVGSVGElement> {
   checkAbort(options.signal);
-  const scene = emptyScene(viewBox);
+  const scene = emptyScene(viewBox, options);
   let started = performance.now();
   let processed = 0;
   for (const group of sceneGroups(entities, deletedEntityIds)) {
@@ -265,8 +277,8 @@ export async function buildCadSvgSceneAsync(entities: CadSvgEntity[], viewBox: C
   return scene;
 }
 
-export function buildCadSvgBase64(entities: CadSvgEntity[], viewBox: CadSvgBounds): string {
-  return encodeCadSvg(new XMLSerializer().serializeToString(buildCadSvgScene(entities, viewBox)));
+export function buildCadSvgBase64(entities: CadSvgEntity[], viewBox: CadSvgBounds, options: CadSvgBuildOptions = {}): string {
+  return encodeCadSvg(new XMLSerializer().serializeToString(buildCadSvgScene(entities, viewBox, new Set(), options)));
 }
 
 export async function buildCadSvgBase64Async(entities: CadSvgEntity[], viewBox: CadSvgBounds,
@@ -276,7 +288,7 @@ export async function buildCadSvgBase64Async(entities: CadSvgEntity[], viewBox: 
   // Serialize entity by entity and encode in a yielding loop. UTF-8 chunks are
   // joined before base64 encoding so multibyte characters cannot be split.
   const serializer = new XMLSerializer();
-  const parts: string[] = [`<svg xmlns="${SVG_NS}" viewBox="${scene.getAttribute('viewBox')}">`];
+  const parts: string[] = [`<svg xmlns="${SVG_NS}" data-cad-scene="true" preserveAspectRatio="xMidYMid meet" viewBox="${scene.getAttribute('viewBox')}">`];
   let count = 0;
   for (const group of Array.from(scene.children)) {
     checkAbort(options.signal);

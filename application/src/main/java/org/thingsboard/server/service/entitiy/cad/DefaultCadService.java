@@ -270,6 +270,16 @@ class DefaultCadService implements CadService {
         result.setSourceEntityCount(manifest.path("sourceEntityCount").asInt(entities.size()));
         result.setUnrenderedEntityCount(manifest.path("unrenderedEntityCount").asInt());
         result.setSkippedPrimitiveCount(manifest.path("skippedCount").asInt());
+        String background = manifest.path("backgroundColor").asText("#ffffff");
+        if (!background.matches("#[0-9a-fA-F]{6}")) throw new IOException("Invalid CAD background color");
+        result.setBackgroundColor(background);
+        List<CadPerEntityResult.ConversionWarning> warnings = new ArrayList<>();
+        for (var warning : manifest.path("warnings")) {
+            if (warnings.size() >= 100) break;
+            warnings.add(new CadPerEntityResult.ConversionWarning(
+                    warning.path("handle").asText(), warning.path("type").asText(), warning.path("reason").asText()));
+        }
+        result.setWarnings(warnings);
         // v2 preview is reconstructed from the canonical entity resources. Avoid
         // transmitting a second copy of the complete drawing as base64 JSON.
         Path preview = outputDir.resolve("preview.svg");

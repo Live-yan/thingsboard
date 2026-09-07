@@ -36,6 +36,17 @@ public class CadPerEntityResult {
     private int sourceEntityCount;
     private int unrenderedEntityCount;
     private int skippedPrimitiveCount;
+    private String backgroundColor;
+    private List<ConversionWarning> warnings = List.of();
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ConversionWarning {
+        private String handle;
+        private String type;
+        private String reason;
+    }
 
     public CadPerEntityResult(String preview, List<CadEntityInfo> manifest,
                               ModelspaceBounds bounds, PreviewTransform transform) {

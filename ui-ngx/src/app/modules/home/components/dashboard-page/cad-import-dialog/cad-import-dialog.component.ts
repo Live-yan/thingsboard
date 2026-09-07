@@ -142,6 +142,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   private selectionHighlights: Map<string, Rect> = new Map<string, Rect>();
   private highlightLayer: G | null = null;
   private previewRendered = false;
+  private viewDestroyed = false;
   private isDragging = false;
   private selectionMoved = false;
   private suppressNextEntityClickId: string | null = null;
@@ -186,11 +187,16 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
 
   ngAfterViewChecked(): void {
     if (this.step === 'preview' && this.result && this.previewCanvasRef && !this.previewRendered) {
-      this.renderPreview();
+      // Do not change template-bound loading state in the view-check hook.
+      this.previewRendered = true;
+      queueMicrotask(() => {
+        if (!this.viewDestroyed && this.step === 'preview') void this.renderPreview();
+      });
     }
   }
 
   ngOnDestroy(): void {
+    this.viewDestroyed = true;
     this.processing?.abort();
     this.destroyed$.next();
     this.destroyed$.complete();

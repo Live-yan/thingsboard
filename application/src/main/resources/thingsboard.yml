@@ -2261,13 +2261,21 @@ mqtt:
 
 # CAD conversion configuration
 cad:
+  # Python executable with the supported ezdxf runtime installed.
   python-path: "${CAD_PYTHON_PATH:python}"
+  # Path to the CAD conversion entry point and its sibling scene module.
   script-path: "${CAD_SCRIPT_PATH:${pkg.dirname}/scripts/cad/dwg_to_svg.py}"
+  # Maximum wall-clock duration of one CAD conversion in seconds.
   conversion-timeout-seconds: "${CAD_CONVERSION_TIMEOUT:300}"
+  # Maximum uploaded CAD size in MiB; align multipart and reverse-proxy limits.
   max-file-size-mb: "${CAD_MAX_FILE_SIZE:50}"
+  # Tenant-scoped staging directory; provide disk capacity for concurrent conversions.
   temp-dir: "${CAD_TEMP_DIR:${java.io.tmpdir}/cad-convert}"
+  # Maximum top-level CAD instances admitted to per-entity conversion.
   max-entities: "${CAD_MAX_ENTITIES:5000}"
+  # Maximum active CAD conversions per service instance; excess requests receive HTTP 429.
   max-concurrent-conversions: "${CAD_MAX_CONCURRENT_CONVERSIONS:2}"
+  # Maximum total conversion output size in MiB before terminating the converter.
   max-output-size-mb: "${CAD_MAX_OUTPUT_SIZE_MB:64}"
 
 iot-hub:

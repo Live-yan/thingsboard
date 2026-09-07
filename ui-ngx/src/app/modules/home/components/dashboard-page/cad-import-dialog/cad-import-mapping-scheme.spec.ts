@@ -102,3 +102,17 @@ assert.deepEqual(result.groupMappings[0].entityIds, largerSquare.map(entity => e
 assert.equal(result.groupMappings[0].widgetInfo, groupWidgetInfo);
 assert.equal(result.entityMappings.get('horizontal-long'), widgetInfo);
 assert.equal(result.entityMappings.has('larger-top'), false);
+
+// Dense drawings must not enter an unbounded all-pairs / combinatorial group search.
+const dense = Array.from({ length: 5000 }, (_, index) => ({ ...horizontalShort, id: `dense-${index}` }));
+const limited = applyCadMappingScheme(dense, {
+  ...scheme,
+  groupRules: [{
+    signature: createCadGroupSignature(dense.slice(0, 2)),
+    memberSignatures: dense.slice(0, 2).map(createCadEntitySignature),
+    widgetInfo: groupWidgetInfo
+  }]
+});
+assert.equal(limited.groupMatchingLimited, true);
+assert.equal(limited.groupMappings.length, 0);
+assert.equal(limited.entityMappings.size, 5000);

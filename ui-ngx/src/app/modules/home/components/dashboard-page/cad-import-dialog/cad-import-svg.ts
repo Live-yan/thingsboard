@@ -195,15 +195,17 @@ function isolateEntitySvg(source: string, prefix: string): SVGSVGElement {
   return root;
 }
 
-export function buildCadSvgScene(entities: CadSvgEntity[], viewBox: CadSvgBounds,
-                                 deletedEntityIds: ReadonlySet<string> = new Set()): SVGSVGElement {
-  validateCadSvgBounds(viewBox);
-  const scene = document.createElementNS(SVG_NS, 'svg');
-  scene.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+export interface CadSvgBuildOptions {
+  signal?: AbortSignal;
+  onProgress?: (processed: number, total: number) => void;
+}
+
+function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>): Generator<SVGGElement> {
   const seen = new Set<string>();
   const scope = 'cad-' + crypto.getRandomValues(new Uint32Array(4)).join('-');
-  entities.forEach((entity, index) => {
-    if (deletedEntityIds.has(entity.id)) return;
+  for (let index = 0; index < entities.length; index++) {
+    const entity = entities[index];
+    if (deleted.has(entity.id)) continue;
     if (!entity.id || seen.has(entity.id)) throw new Error('Duplicate or missing CAD entity id.');
     seen.add(entity.id);
     if (!entity.svgBase64) throw new Error(`Missing SVG for CAD entity ${entity.id}.`);
@@ -220,11 +222,77 @@ export function buildCadSvgScene(entities: CadSvgEntity[], viewBox: CadSvgBounds
     const group = document.createElementNS(SVG_NS, 'g');
     group.setAttribute('data-cad-entity-id', entity.id);
     group.appendChild(document.importNode(svg, true));
+    yield group;
+  }
+}
+
+function emptyScene(viewBox: CadSvgBounds): SVGSVGElement {
+  validateCadSvgBounds(viewBox);
+  const scene = document.createElementNS(SVG_NS, 'svg');
+  scene.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+  return scene;
+}
+
+export function buildCadSvgScene(entities: CadSvgEntity[], viewBox: CadSvgBounds,
+                                 deletedEntityIds: ReadonlySet<string> = new Set()): SVGSVGElement {
+  const scene = emptyScene(viewBox);
+  for (const group of sceneGroups(entities, deletedEntityIds)) scene.appendChild(group);
+  return scene;
+}
+
+function checkAbort(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+}
+
+export async function buildCadSvgSceneAsync(entities: CadSvgEntity[], viewBox: CadSvgBounds,
+    deletedEntityIds: ReadonlySet<string> = new Set(), options: CadSvgBuildOptions = {}): Promise<SVGSVGElement> {
+  checkAbort(options.signal);
+  const scene = emptyScene(viewBox);
+  let started = performance.now();
+  let processed = 0;
+  for (const group of sceneGroups(entities, deletedEntityIds)) {
+    checkAbort(options.signal);
     scene.appendChild(group);
-  });
+    processed++;
+    if (performance.now() - started >= 8 || processed % 50 === 0) {
+      options.onProgress?.(processed, entities.length);
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      checkAbort(options.signal);
+      started = performance.now();
+    }
+  }
+  options.onProgress?.(entities.length, entities.length);
   return scene;
 }
 
 export function buildCadSvgBase64(entities: CadSvgEntity[], viewBox: CadSvgBounds): string {
   return encodeCadSvg(new XMLSerializer().serializeToString(buildCadSvgScene(entities, viewBox)));
+}
+
+export async function buildCadSvgBase64Async(entities: CadSvgEntity[], viewBox: CadSvgBounds,
+                                             options: CadSvgBuildOptions = {}): Promise<string> {
+  const scene = await buildCadSvgSceneAsync(entities, viewBox, new Set(), options);
+  checkAbort(options.signal);
+  // Serialize entity by entity and encode in a yielding loop. UTF-8 chunks are
+  // joined before base64 encoding so multibyte characters cannot be split.
+  const serializer = new XMLSerializer();
+  const parts: string[] = [`<svg xmlns="${SVG_NS}" viewBox="${scene.getAttribute('viewBox')}">`];
+  let count = 0;
+  for (const group of Array.from(scene.children)) {
+    checkAbort(options.signal);
+    parts.push(serializer.serializeToString(group));
+    group.remove();
+    if (++count % 50 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  parts.push('</svg>');
+  const bytes = new TextEncoder().encode(parts.join(''));
+  const encoded: string[] = [];
+  // Multiples of three avoid padding in all but the last base64 chunk.
+  for (let i = 0; i < bytes.length; i += 49152) {
+    checkAbort(options.signal);
+    encoded.push(btoa(String.fromCharCode(...bytes.subarray(i, i + 49152))));
+    if (i % (49152 * 8) === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  checkAbort(options.signal);
+  return encoded.join('');
 }

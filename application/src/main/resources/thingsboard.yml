@@ -2267,6 +2267,8 @@ cad:
   max-file-size-mb: "${CAD_MAX_FILE_SIZE:50}"
   temp-dir: "${CAD_TEMP_DIR:${java.io.tmpdir}/cad-convert}"
   max-entities: "${CAD_MAX_ENTITIES:5000}"
+  max-concurrent-conversions: "${CAD_MAX_CONCURRENT_CONVERSIONS:2}"
+  max-output-size-mb: "${CAD_MAX_OUTPUT_SIZE_MB:64}"
 
 iot-hub:
   base-url: "${IOT_HUB_BASE_URL:https://iot-hub.thingsboard.io}" # IoT Hub base URL for fetching published items, resources, etc.

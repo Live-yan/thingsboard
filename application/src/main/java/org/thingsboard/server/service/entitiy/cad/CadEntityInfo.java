@@ -37,4 +37,23 @@ public class CadEntityInfo {
     private double previewWidth;
     private double previewHeight;
 
+    private String handle;
+    private String layer;
+
+    public CadEntityInfo(String id, String type, String svgBase64, double x, double y,
+                         double width, double height, String blockName,
+                         double previewX, double previewY, double previewWidth, double previewHeight) {
+        this.id = id;
+        this.type = type;
+        this.svgBase64 = svgBase64;
+        this.x = x;
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.blockName = blockName;
+        this.previewX = previewX;
+        this.previewY = previewY;
+        this.previewWidth = previewWidth;
+        this.previewHeight = previewHeight;
+    }
 }

@@ -43,24 +43,28 @@ public class CadController extends BaseController {
     @PostMapping(value = "/cad/convert", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<CadConvertResult> convertCadFile(
             @RequestPart MultipartFile file) throws Exception {
-        var result = cadService.convertDwgToSvg(
-                file.getBytes(),
-                file.getOriginalFilename(),
-                getCurrentUser().getTenantId()
-        );
-        return ResponseEntity.ok(result);
+        try (var input = file.getInputStream()) {
+            var result = cadService.convertDwgToSvg(
+                    input, file.getSize(),
+                    file.getOriginalFilename(),
+                    getCurrentUser().getTenantId()
+            );
+            return ResponseEntity.ok(result);
+        }
     }
 
     @PreAuthorize("hasAnyAuthority('SYS_ADMIN', 'TENANT_ADMIN')")
     @PostMapping(value = "/cad/convert-per-entity", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<CadPerEntityResult> convertCadFilePerEntity(
             @RequestPart MultipartFile file) throws Exception {
-        var result = cadService.convertDwgToPerEntitySvg(
-                file.getBytes(),
-                file.getOriginalFilename(),
-                getCurrentUser().getTenantId()
-        );
-        return ResponseEntity.ok(result);
+        try (var input = file.getInputStream()) {
+            var result = cadService.convertDwgToPerEntitySvg(
+                    input, file.getSize(),
+                    file.getOriginalFilename(),
+                    getCurrentUser().getTenantId()
+            );
+            return ResponseEntity.ok(result);
+        }
     }
 
 }

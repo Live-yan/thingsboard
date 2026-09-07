@@ -14,7 +14,7 @@
 /// limitations under the License.
 ///
 
-import { buildCadSvgBase64, validateCadSvgBounds } from './cad-import-svg';
+import { buildCadSvgBase64, buildCadSvgBase64Async, CadSvgBuildOptions, validateCadSvgBounds } from './cad-import-svg';
 
 export interface CadImportWidgetPlanInput {
   importEntityCount: number;
@@ -68,7 +68,7 @@ export interface CadImportWidgetItem<TWidgetInfo = any> {
 
 export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   entities: CadImportWidgetEntity[];
-  deletedEntityIds: Set<string>;
+  deletedEntityIds: ReadonlySet<string>;
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
   /** Unmapped entities form one static background occupying this entire frame. */
@@ -106,8 +106,8 @@ function unionBounds<T>(
   };
 }
 
-export function buildCadImportWidgetItems<TWidgetInfo = any>(
-  input: CadImportWidgetItemsInput<TWidgetInfo>
+function planCadImportWidgetItems<TWidgetInfo = any>(
+  input: CadImportWidgetItemsInput<TWidgetInfo>, buildComposite = buildCadSvgBase64
 ): CadImportWidgetItem<TWidgetInfo>[] {
   if (input.previewViewBox) validateCadSvgBounds(input.previewViewBox);
   const order = new Map(input.entities.map((entity, index) => [entity.id, index]));
@@ -169,7 +169,7 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(
     const compositeEntity: CadImportWidgetEntity = {
       id: UNMAPPED_COMPOSITE_ID,
       type: 'UNMAPPED_COMPOSITE',
-      svgBase64: buildCadSvgBase64(unmappedEntities, frame),
+      svgBase64: buildComposite(unmappedEntities, frame),
       ...unionBounds(unmappedEntities, entity => ({
         x: entity.x, y: entity.y, width: entity.width, height: entity.height
       })),
@@ -289,4 +289,20 @@ function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]):
       previewHeight: previewBounds.height
     } : {})
   };
+}
+
+export function buildCadImportWidgetItems<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>): CadImportWidgetItem<TWidgetInfo>[] {
+  return planCadImportWidgetItems(input);
+}
+
+export async function buildCadImportWidgetItemsAsync<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>,
+    options: CadSvgBuildOptions = {}): Promise<CadImportWidgetItem<TWidgetInfo>[]> {
+  const items = planCadImportWidgetItems(input, () => '');
+  const background = items.find(item => item.id === UNMAPPED_COMPOSITE_ID);
+  if (background && input.previewViewBox) {
+    const ids = new Set(background.entityIds);
+    background.entity.svgBase64 = await buildCadSvgBase64Async(input.entities.filter(entity => ids.has(entity.id)),
+      input.previewViewBox, options);
+  }
+  return items;
 }

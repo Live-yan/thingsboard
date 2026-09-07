@@ -17,10 +17,23 @@ package org.thingsboard.server.service.entitiy.cad;
 
 import org.thingsboard.server.common.data.id.TenantId;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+
 public interface CadService {
 
-    CadConvertResult convertDwgToSvg(byte[] fileContent, String originalFilename, TenantId tenantId);
+    default CadConvertResult convertDwgToSvg(byte[] content, String name, TenantId tenantId) {
+        if (content == null) throw new IllegalArgumentException("File is empty");
+        return convertDwgToSvg(new ByteArrayInputStream(content), content.length, name, tenantId);
+    }
 
-    CadPerEntityResult convertDwgToPerEntitySvg(byte[] fileContent, String originalFilename, TenantId tenantId);
+    CadConvertResult convertDwgToSvg(InputStream content, long size, String name, TenantId tenantId);
+
+    default CadPerEntityResult convertDwgToPerEntitySvg(byte[] content, String name, TenantId tenantId) {
+        if (content == null) throw new IllegalArgumentException("File is empty");
+        return convertDwgToPerEntitySvg(new ByteArrayInputStream(content), content.length, name, tenantId);
+    }
+
+    CadPerEntityResult convertDwgToPerEntitySvg(InputStream content, long size, String name, TenantId tenantId);
 
 }

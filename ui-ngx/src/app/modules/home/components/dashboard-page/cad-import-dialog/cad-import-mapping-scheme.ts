@@ -42,6 +42,7 @@ export interface CadMappingScheme {
 
 export interface CadMappingSchemeApplication {
   entityMappings: Map<string, WidgetInfo>;
+  groupMatchingLimited?: boolean;
   groupMappings: CadImportGroupMapping<WidgetInfo>[];
 }
 
@@ -191,7 +192,8 @@ const findMatchingGroupMembers = (
   candidates: CadEntityInfo[],
   requiredSignatures: string[],
   signatures: Map<string, string>,
-  expectedShape: string | null
+  expectedShape: string | null,
+  budget: { remaining: number }
 ): CadEntityInfo[] | null => {
   const overlapArea = (left: CadEntityBounds, right: CadEntityBounds): number => {
     const width = Math.max(0, Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x));
@@ -207,6 +209,7 @@ const findMatchingGroupMembers = (
   let bestMatch: CadEntityInfo[] | null = null;
   let bestScore = Infinity;
   const search = (start: number, selected: CadEntityInfo[]): CadEntityInfo[] | null => {
+    if (--budget.remaining < 0) throw new Error('CAD group search budget exceeded');
     if (selected.length === requiredSignatures.length) {
       const selectedSignatures = selected.map(entity => signatures.get(entity.id)!);
       if (multisetEqual(selectedSignatures, requiredSignatures) &&
@@ -272,20 +275,37 @@ export const applyCadMappingScheme = (
   const signatures = new Map(entities.map(entity => [entity.id, createCadEntitySignature(entity)]));
   const order = new Map(entities.map((entity, index) => [entity.id, index]));
   const used = new Set<string>();
+  const budget = { remaining: 10000 };
+  let groupMatchingLimited = false;
   const groupRules = loaded.groupRules
     .map((rule, index) => ({ rule, index }))
     .sort((left, right) => right.rule.memberSignatures.length - left.rule.memberSignatures.length || left.index - right.index);
 
   groupRules.forEach(({ rule, index }) => {
     const requiredSignatures = sortedSignatures(rule.memberSignatures);
+    if (budget.remaining <= 0 || requiredSignatures.length > 16) {
+      groupMatchingLimited = true;
+      return;
+    }
     const candidates = entities.filter(entity => !used.has(entity.id) && requiredSignatures.includes(signatures.get(entity.id)!));
+    // Bound the quadratic connected-component phase as well as backtracking.
+    if (candidates.length > 200) {
+      groupMatchingLimited = true;
+      return;
+    }
     connectedComponents(candidates).forEach(component => {
-      const matchedMembers = findMatchingGroupMembers(
+      let matchedMembers: CadEntityInfo[] | null;
+      try {
+      matchedMembers = findMatchingGroupMembers(
         component,
         requiredSignatures,
         signatures,
-        ruleShape(rule.signature)
+        ruleShape(rule.signature), budget
       );
+      } catch {
+        groupMatchingLimited = true;
+        return;
+      }
       if (!matchedMembers) {
         return;
       }
@@ -318,7 +338,7 @@ export const applyCadMappingScheme = (
       }
     }
   });
-  return { entityMappings, groupMappings };
+  return { entityMappings, groupMappings, groupMatchingLimited };
 };
 
 export const createCadMappingScheme = (

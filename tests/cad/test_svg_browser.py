@@ -35,7 +35,7 @@ def compiled(tmp_path_factory):
     subprocess.run([
         'tsc', '--strict', '--target', 'es2020', '--module', 'commonjs',
         '--lib', 'es2020,dom', '--outDir', str(output),
-        str(CAD / 'cad-import-widget-generation.ts'),
+        str(CAD / 'cad-import-widget-generation.ts'), str(CAD / 'cad-scene-state.ts'),
     ], check=True)
     return output
 
@@ -56,7 +56,7 @@ def page(browser, compiled):
     page = browser.new_page(viewport={'width': 800, 'height': 600})
     page.set_content('<style>body { margin: 0; background: white; } svg { display: block; }</style><div id="scene"></div>')
     page.evaluate('window.cadModules = {}')
-    for name in ('cad-import-svg', 'cad-import-widget-generation'):
+    for name in ('cad-import-svg', 'cad-import-widget-generation', 'cad-scene-state'):
         source = (compiled / (name + '.js')).read_text(encoding='utf-8')
         page.add_script_tag(content=(
             "cadModules['./" + name + "'] = {};\n"
@@ -245,8 +245,10 @@ def test_converter_assets_preview_export_parity(page, tmp_path):
     import importlib.util
     import json
     import ezdxf
+    import sys
 
     source = ROOT / 'application/src/main/data/scripts/cad/dwg_to_svg.py'
+    sys.path.insert(0, str(source.parent))
     spec = importlib.util.spec_from_file_location('cad_converter_under_test', source)
     converter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(converter)
@@ -289,3 +291,74 @@ def test_converter_assets_preview_export_parity(page, tmp_path):
     (artifacts / 'converted-preview.png').write_bytes(preview)
     (artifacts / 'converted-dashboard-background.png').write_bytes(exported)
     assert exported == preview
+
+
+def test_same_block_instances_delete_save_reload_and_async_export(page):
+    result = page.evaluate('''async () => {
+      const {CadSceneState} = cadModules['./cad-scene-state'];
+      const entities = crossing.map(e => ({...e, type: 'INSERT', blockName: 'PUMP'}));
+      const scene = new CadSceneState('a'.repeat(64), entities);
+      scene.deleteInstances(['horizontal']);
+      const dashboard = JSON.parse(JSON.stringify({configuration: {widgets: {
+        background: {config: {cadSceneEdits: scene.snapshot()}}
+      }}}));
+      const restored = new CadSceneState('a'.repeat(64), entities);
+      restored.restore(dashboard.configuration.widgets.background.config.cadSceneEdits);
+      const output = await planApi.buildCadImportWidgetItemsAsync({
+        entities: restored.keptEntities, deletedEntityIds: restored.deletedEntityIds,
+        entityMappings: new Map(), groupMappings: [], previewViewBox: frame
+      });
+      const svg = new DOMParser().parseFromString(svgApi.decodeCadSvg(output[0].entity.svgBase64), 'image/svg+xml');
+      return {retained: output[0].entityIds, removed: svg.querySelectorAll('[data-cad-entity-id=horizontal]').length,
+              instances: svg.querySelectorAll('g[data-cad-entity-id]').length,
+              source: entities.map(e => e.id), edits: restored.snapshot()};
+    }''')
+    assert result['retained'] == ['vertical']
+    assert result['removed'] == 0 and result['instances'] == 1
+    assert result['source'] == ['horizontal', 'vertical']
+    assert result['edits']['deletedEntityIds'] == ['horizontal']
+
+
+def test_async_preview_export_yields_to_browser_and_preserves_utf8(page, tmp_path):
+    import json
+    report = page.evaluate('''async () => {
+      const entities = Array.from({length: 1500}, (_, i) => entity('instance-' + i, 'red',
+          '<text x="5" y="50">阀门🔧</text><path class="C0" d="M 5 50 L 95 50"/>'));
+      let ticks = 0;
+      const timer = setInterval(() => ticks++, 0);
+      const start = performance.now();
+      try {
+        const scene = await svgApi.buildCadSvgSceneAsync(entities, frame);
+        const previewTicks = ticks;
+        const output = await planApi.buildCadImportWidgetItemsAsync({
+          entities, deletedEntityIds: new Set(), entityMappings: new Map(), groupMappings: [], previewViewBox: frame
+        });
+        const xml = new DOMParser().parseFromString(svgApi.decodeCadSvg(output[0].entity.svgBase64), 'image/svg+xml');
+        return {entities: scene.querySelectorAll('g[data-cad-entity-id]').length,
+                textCount: xml.querySelectorAll('text').length, text: xml.querySelector('text').textContent,
+                widgets: output.length, previewTicks, exportTicks: ticks-previewTicks,
+                milliseconds: performance.now()-start, userAgent: navigator.userAgent};
+      } finally { clearInterval(timer); }
+    }''')
+    assert report['entities'] == report['textCount'] == 1500
+    assert report['text'] == '阀门🔧' and report['widgets'] == 1
+    assert report['previewTicks'] > 0 and report['exportTicks'] > 0
+    artifact = Path(os.environ.get('CAD_TEST_ARTIFACTS', str(tmp_path)))
+    artifact.mkdir(parents=True, exist_ok=True)
+    (artifact / 'browser-scene-report.json').write_text(json.dumps(report, indent=2))
+
+
+@pytest.mark.parametrize('before_start', [True, False])
+def test_async_build_cancellation_does_not_attach_partial_scene(page, before_start):
+    result = page.evaluate('''async before => {
+      const entities = Array.from({length: 1000}, (_, i) => ({...crossing[0], id:'instance-' + i}));
+      const controller = new AbortController();
+      if (before) controller.abort(); else setTimeout(() => controller.abort(), 0);
+      try {
+        const scene = await svgApi.buildCadSvgSceneAsync(entities, frame, new Set(), {signal:controller.signal});
+        document.getElementById('scene').replaceChildren(scene);
+        return 'not aborted';
+      } catch(error) { return error.name; }
+    }''', before_start)
+    assert result == 'AbortError'
+    assert page.locator('#scene svg').count() == 0

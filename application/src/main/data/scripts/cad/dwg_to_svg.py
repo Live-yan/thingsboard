@@ -35,6 +35,7 @@ DWG → SVG 转换脚本。
 """
 
 import argparse
+import os
 import json
 import re
 import subprocess
@@ -49,7 +50,7 @@ from ezdxf import colors as ezdxf_colors
 from ezdxf.addons.drawing import Frontend, RenderContext, layout, svg
 
 # ── 配置 ──────────────────────────────────────────────────────────────
-ODA_PATH = r"D:\Tool\ODA\ODAFileConverter.exe"
+ODA_PATH = os.environ.get("ODA_FILE_CONVERTER", r"D:\Tool\ODA\ODAFileConverter.exe")
 FILES_DIR = Path(__file__).parent.parent / "files"
 OUTPUT_DIR = Path(__file__).parent / "output_svg"
 
@@ -201,7 +202,8 @@ def dwg_to_dxf(dwg_path: Path, output_dir: Path | None = None) -> Path:
         str(output_dir),
         "ACAD2018",
         "DXF",
-        "0",
+        "0",  # recursive
+        "0",  # audit
         dwg_path.name,
     ]
 
@@ -1051,246 +1053,10 @@ def _expand_insert(entity, doc, depth=0, max_depth=3):
 def dxf_to_per_entity_svgs(dxf_path: Path, output_folder: Path,
                             *, max_entities: int = 5000,
                             invert_block_colors: bool = False) -> dict:
-    """
-    将 DXF 转换为逐实体 SVG 文件夹。
-
-    输出:
-    ├── preview.svg        # 总预览图
-    ├── manifest.json      # 实体清单
-    └── entities/
-        ├── entity_0.svg
-        ├── entity_1.svg
-        └── ...
-    """
-    doc = ezdxf.readfile(str(dxf_path))
-    msp = doc.modelspace()
-    output_folder.mkdir(parents=True, exist_ok=True)
-
-    all_entities = list(msp)
-    total_count = len(all_entities)
-
-    if total_count > max_entities:
-        raise ValueError(
-            f"Entity count {total_count} exceeds max {max_entities}"
-        )
-
-    entities_dir = output_folder / "entities"
-    entities_dir.mkdir(exist_ok=True)
-
-    manifest_entries = []
-    preview_entity_svgs = []
-    entity_outputs = []
-    skipped = 0
-
-    tmp_doc = ezdxf.new(doc.dxfversion)
-    tmp_msp = tmp_doc.modelspace()
-    tmp_ctx = RenderContext(tmp_doc)
-
-    for i, entity in enumerate(all_entities):
-        etype = entity.dxftype()
-
-        if etype not in SUPPORTED_ENTITY_TYPES:
-            print(f"      跳过不支持的实体类型: {etype}")
-            skipped += 1
-            continue
-
-        if etype == "INSERT":
-            sub_entities = _expand_insert(entity, doc)
-            if not sub_entities:
-                print(f"      跳过空 INSERT: {entity.dxf.get('name', '?')}")
-                skipped += 1
-                continue
-            entities_to_render = sub_entities
-        else:
-            entities_to_render = [entity]
-
-        bb = _entity_bbox(entities_to_render[0] if etype != "INSERT" else entity, doc)
-        if bb is None:
-            print(f"      跳过无法计算 bbox 的实体: {etype}")
-            skipped += 1
-            continue
-
-        try:
-            for e in list(tmp_msp):
-                e.destroy()
-
-            for sub_e in entities_to_render:
-                try:
-                    tmp_msp.add_foreign_entity(sub_e)
-                except Exception as e:
-                    print(f"      跳过无法添加的子实体: {e}")
-
-            entity_svg = _render_msp_to_svg(tmp_doc, tmp_msp, coord_space=BLOCK_COORD_SPACE, ctx=tmp_ctx)
-            entity_svg = _strip_xml_prolog(entity_svg)
-
-            if entity_svg.strip().endswith("/>") or "</svg>" not in entity_svg or len(entity_svg) < 50:
-                fallback = _build_fallback_svg(entity, doc)
-                if fallback:
-                    entity_svg = fallback
-                else:
-                    print(f"      跳过无法渲染的退化实体: {etype}")
-                    skipped += 1
-                    continue
-
-            entity_svg = _strip_mm_dimensions(entity_svg, target_width_px=None)
-            entity_svg = _remove_background_rect(entity_svg)
-            entity_svg = _make_svg_visible_on_light_background(entity_svg)
-
-            entity_id = f"entity_{len(manifest_entries)}"
-            preview_entity_svgs.append((entity_id, entity_svg, bb))
-
-            entity_title = entity.dxf.name if etype == "INSERT" and entity.dxf.get('name') else f"{etype}_{len(manifest_entries)}"
-            entity_outputs.append((entity_id, entity_svg, bb, entity_title))
-        except Exception as e:
-            print(f"      跳过渲染失败的实体 {etype}: {e}")
-            skipped += 1
-            continue
-
-        min_x, min_y, max_x, max_y = bb
-        svg_filename = f"{entity_id}.svg"
-        entry = {
-            "id": entity_id,
-            "type": etype,
-            "svgFile": f"entities/{svg_filename}",
-            "x": round(min_x, 6),
-            "y": round(min_y, 6),
-            "width": round(max_x - min_x, 6),
-            "height": round(max_y - min_y, 6),
-            "blockName": entity.dxf.name if etype == "INSERT" else None,
-        }
-        manifest_entries.append(entry)
-
-    if not manifest_entries:
-        print("      警告: 无可用实体，跳过预览图")
-        manifest = {
-            "preview": "preview.svg",
-            "totalCount": 0,
-            "entities": [],
-        }
-        manifest_path = output_folder / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return {
-            "preview": None,
-            "manifest": str(manifest_path),
-            "totalCount": 0,
-            "entities": [],
-        }
-
-    overall_min_x = min(e["x"] for e in manifest_entries)
-    overall_min_y = min(e["y"] for e in manifest_entries)
-    overall_max_x = max(e["x"] + e["width"] for e in manifest_entries)
-    overall_max_y = max(e["y"] + e["height"] for e in manifest_entries)
-
-    ms_bounds = (overall_min_x, overall_max_x, overall_min_y, overall_max_y)
-    ms_min_x, ms_max_x, ms_min_y, ms_max_y = ms_bounds
-
-    print(f"      渲染预览图 ({len(preview_entity_svgs)} 个实体组)...")
-    full_preview_svg = _render_msp_to_svg(doc, msp, coord_space=PREVIEW_COORD_SPACE)
-    full_preview_svg = _strip_xml_prolog(full_preview_svg)
-    full_preview_svg = _strip_mm_dimensions(full_preview_svg, target_width_px=None)
-    full_preview_svg = _remove_background_rect(full_preview_svg)
-    full_preview_svg = _make_svg_visible_on_light_background(full_preview_svg)
-    full_preview_viewbox = _extract_svg_viewbox(full_preview_svg) or (0, 0, BLOCK_COORD_SPACE, BLOCK_COORD_SPACE)
-    full_preview_svg = _make_thin_strokes_visible(
-        full_preview_svg, _preview_min_stroke_width(full_preview_viewbox)
-    )
-    full_preview_inner = _svg_inner_content(full_preview_svg)
-    svg_edge_pad = max(full_preview_viewbox[2], full_preview_viewbox[3], 1.0) * PREVIEW_EDGE_PAD_RATIO
-    preview_vb_x = full_preview_viewbox[0] - svg_edge_pad
-    preview_vb_y = full_preview_viewbox[1] - svg_edge_pad
-    preview_vb_w = full_preview_viewbox[2] + (svg_edge_pad * 2)
-    preview_vb_h = full_preview_viewbox[3] + (svg_edge_pad * 2)
-
-    entity_hitboxes = []
-    preview_bboxes = {}
-    preview_visual_bboxes = {}
-    for eid, esvg, ebb in preview_entity_svgs:
-        ex_min, ey_min, ex_max, ey_max = _cad_bbox_to_svg_bbox(
-            ebb, ms_bounds, full_preview_viewbox, svg_edge_pad
-        )
-        preview_bboxes[eid] = (ex_min, ey_min, ex_max, ey_max)
-        preview_visual_bboxes[eid] = _cad_bbox_to_svg_bbox(
-            ebb, ms_bounds, full_preview_viewbox, 0.0
-        )
-        group = _entity_preview_hitbox(
-            eid, ex_min, ey_min, ex_max, ey_max, svg_edge_pad
-        )
-        entity_hitboxes.append(group)
-    all_hitboxes = "\n".join(entity_hitboxes)
-    preview_svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="{preview_vb_x} {preview_vb_y} {preview_vb_w} {preview_vb_h}">'
-        f'<rect x="{preview_vb_x}" y="{preview_vb_y}" width="{preview_vb_w}" height="{preview_vb_h}" '
-        f'fill="#ffffff" data-cad-background="true"/>'
-        f'<g data-cad-visual-layer="true" pointer-events="none">{full_preview_inner}</g>'
-        f'<g data-cad-hitbox-layer="true">{all_hitboxes}</g></svg>'
-    )
-
-    preview_path = output_folder / "preview.svg"
-    preview_path.write_text(preview_svg, encoding="utf-8")
-
-    for entity_id, entity_svg, bb, entity_title in entity_outputs:
-        if entity_id in preview_bboxes:
-            entity_svg = _global_entity_svg(
-                entity_svg, entity_id, preview_bboxes[entity_id],
-                preview_visual_bboxes.get(entity_id, preview_bboxes[entity_id]),
-                full_preview_viewbox
-            )
-        else:
-            entity_svg = _resize_svg(entity_svg, BLOCK_WIDTH, transparent_bg=True, invert_colors=True)
-        entity_svg = _wrap_scada_symbol(entity_svg, entity_title)
-        svg_filename = f"{entity_id}.svg"
-        svg_path = entities_dir / svg_filename
-        svg_path.write_text(entity_svg, encoding="utf-8")
-
-    for entry in manifest_entries:
-        pb = preview_bboxes.get(entry["id"])
-        if pb:
-            px1, py1, px2, py2 = pb
-            entry["previewX"] = round(px1, 6)
-            entry["previewY"] = round(py1, 6)
-            entry["previewWidth"] = round(px2 - px1, 6)
-            entry["previewHeight"] = round(py2 - py1, 6)
-
-    manifest = {
-        "preview": "preview.svg",
-        "totalCount": len(manifest_entries),
-        "entities": manifest_entries,
-        "modelspaceBounds": {
-            "minX": round(ms_min_x, 6),
-            "maxX": round(ms_max_x, 6),
-            "minY": round(ms_min_y, 6),
-            "maxY": round(ms_max_y, 6),
-        },
-        "previewViewBox": {
-            "x": round(preview_vb_x, 6),
-            "y": round(preview_vb_y, 6),
-            "width": round(preview_vb_w, 6),
-            "height": round(preview_vb_h, 6),
-        },
-        "scale": round(min(BLOCK_COORD_SPACE / max(ms_max_x - ms_min_x, 1),
-                           BLOCK_COORD_SPACE / max(ms_max_y - ms_min_y, 1)), 6),
-        "translateX": round(ms_min_x, 6),
-        "translateY": round(-ms_max_y, 6),
-        "yFlip": True,
-    }
-    manifest_path = output_folder / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    print(f"      完成: {len(manifest_entries)} 个实体, 跳过 {skipped}")
-
-    return {
-        "preview": str(preview_path),
-        "manifest": str(manifest_path),
-        "totalCount": len(manifest_entries),
-        "entities": manifest_entries,
-    }
+    """Project one canonical original-document recording into preview and assets."""
+    from cad_scene import convert_scene
+    return convert_scene(dxf_path, output_folder, max_entities=max_entities,
+                         max_output_bytes=int(os.environ.get("TB_CAD_MAX_OUTPUT_BYTES", 64 * 1024 * 1024)))
 
 
 # ── 一步到位 ──────────────────────────────────────────────────────────

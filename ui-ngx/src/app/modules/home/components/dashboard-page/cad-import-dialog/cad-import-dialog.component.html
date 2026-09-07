@@ -24,11 +24,22 @@
 </mat-toolbar>
 
 <mat-dialog-content class="cad-import-dialog-content">
+  @if (step !== 'upload' && errorMessage) {
+    <div class="error-message" role="alert">{{ errorMessage }}</div>
+  }
+  @if (sceneWarning) {
+    <div class="warning-message" role="status">{{ sceneWarning }}</div>
+  }
+  @if (step === 'preview' && isLoading) {
+    <mat-progress-bar mode="indeterminate" aria-label="Preparing CAD scene"></mat-progress-bar>
+  }
   @switch (step) {
     @case ('upload') {
       <div class="upload-step">
         @if (isLoading) {
-          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <mat-progress-bar [mode]="uploadPercent !== null && uploadPercent < 100 ? 'determinate' : 'indeterminate'"
+                            [value]="uploadPercent || 0"></mat-progress-bar>
+          @if (uploadPercent !== null && uploadPercent < 100) { <span>{{ uploadPercent }}%</span> }
           <p class="converting-text">{{ 'dashboard.cad-import-dialog.converting' | translate }}</p>
         } @else {
           <mat-icon class="upload-icon">upload_file</mat-icon>
@@ -53,7 +64,7 @@
     }
     @case ('preview') {
       <div class="preview-step">
-        <div class="preview-toolbar">
+        <div class="preview-toolbar" [attr.inert]="isLoading ? '' : null">
           <span class="selection-info">
             @if (selectedEntityIds.size > 0) {
               {{ selectedEntityIds.size }} selected
@@ -77,6 +88,14 @@
           <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size === 0" (click)="mapSelectedGroup()">
             <mat-icon>join_inner</mat-icon>
             {{ 'dashboard.cad-import-dialog.group-map-selected' | translate }}
+          </button>
+          <button mat-icon-button [disabled]="!canUndoDelete" (click)="undoDelete()"
+                  matTooltip="Restore last deleted instances; device mappings remain cleared">
+            <mat-icon>undo</mat-icon>
+          </button>
+          <button mat-icon-button [disabled]="!savedEdits" (click)="restoreSavedEdits()"
+                  matTooltip="Restore edits saved in this dashboard for the same CAD source">
+            <mat-icon>restore</mat-icon>
           </button>
           <span class="flex-1"></span>
           <div class="zoom-controls">
@@ -122,8 +141,8 @@
           }
         </div>
         <p class="map-hint">{{ 'dashboard.cad-import-dialog.map-hint' | translate }}</p>
-        <div class="entity-list">
-          @for (group of mappedGroups; track group.id) {
+        <div class="entity-list" [attr.inert]="isLoading ? '' : null">
+          @for (group of pageGroups; track group.id) {
             <div class="entity-row mapped">
               <div class="entity-thumbnail">
                 <mat-icon>join_inner</mat-icon>
@@ -140,7 +159,7 @@
               </div>
             </div>
           }
-          @for (entity of mapStepEntities; track entity.id) {
+          @for (entity of pageEntities; track entity.id) {
             <div class="entity-row" [class.mapped]="mappings.get(entity.id)">
               <div class="entity-thumbnail">
                  @if (entity.svgBase64) {
@@ -167,6 +186,17 @@
             </div>
           }
         </div>
+        @if (pageCount > 1) {
+          <div class="mapping-summary">
+            <button mat-button [disabled]="isLoading || pageIndex === 0" (click)="pageIndex = pageIndex - 1" aria-label="Previous CAD page">
+              <mat-icon>chevron_left</mat-icon>
+            </button>
+            <span>{{ pageIndex + 1 }} / {{ pageCount }}</span>
+            <button mat-button [disabled]="isLoading || pageIndex + 1 >= pageCount" (click)="pageIndex = pageIndex + 1" aria-label="Next CAD page">
+              <mat-icon>chevron_right</mat-icon>
+            </button>
+          </div>
+        }
         <div class="mapping-summary">
           <span>{{ 'dashboard.cad-import-dialog.mapped-elements' | translate }}: {{ mappedCount }}</span>
           <span>{{ 'dashboard.cad-import-dialog.unmapped-elements' | translate }}: {{ unmappedCount }}</span>
@@ -203,7 +233,7 @@
 
 <mat-dialog-actions align="end">
   @if (step !== 'upload') {
-    <button mat-button (click)="goBack()">{{ 'dashboard.cad-import-dialog.back' | translate }}</button>
+    <button mat-button [disabled]="isLoading" (click)="goBack()">{{ 'dashboard.cad-import-dialog.back' | translate }}</button>
   }
   <button mat-button (click)="dialogRef.close(null)">{{ 'dashboard.cad-import-dialog.cancel' | translate }}</button>
   @if (step !== 'review') {

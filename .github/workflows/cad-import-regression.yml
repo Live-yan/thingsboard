@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           python -m pip install ezdxf==1.4.4 Pillow==11.3.0 pytest==9.0.2 playwright==1.57.0
           python -m playwright install --with-deps chromium
-          npm install --prefix "$RUNNER_TEMP/cad-tools" --no-audit --no-fund typescript@5.9.3 ts-node@10.9.2
+          npm install --prefix "$RUNNER_TEMP/cad-tools" --no-audit --no-fund typescript@5.9.3 ts-node@10.9.2 tslib@2.8.1
           echo "$RUNNER_TEMP/cad-tools/node_modules/.bin" >> "$GITHUB_PATH"
           echo "NODE_PATH=$RUNNER_TEMP/cad-tools/node_modules" >> "$GITHUB_ENV"
       - name: Existing Python converter regressions

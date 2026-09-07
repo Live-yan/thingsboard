@@ -15,7 +15,7 @@
 ///
 
 import assert from 'node:assert/strict';
-import { DashboardLayout, LayoutType } from '@shared/models/dashboard.models';
+import type { DashboardLayout, LayoutType } from '@shared/models/dashboard.models';
 import { applyCadImportGridSettings, syncCadImportLayoutContext } from './cad-import-dashboard-layout';
 
 const layout: DashboardLayout = {
@@ -24,7 +24,7 @@ const layout: DashboardLayout = {
     widgetB: { row: 90, col: 123, sizeX: 45, sizeY: 67 }
   },
   gridSettings: {
-    layoutType: LayoutType.default,
+    layoutType: 'default' as LayoutType,
     columns: 24,
     margin: 10,
     outerMargin: true,
@@ -55,7 +55,7 @@ applyCadImportGridSettings(layout, {
 });
 syncCadImportLayoutContext(layoutCtx, layout);
 
-assert.equal(layout.gridSettings.layoutType, LayoutType.scada);
+assert.equal(layout.gridSettings.layoutType, 'scada');
 assert.equal(layout.gridSettings.columns, 1000);
 assert.equal(layout.gridSettings.margin, 0);
 assert.equal(layout.gridSettings.outerMargin, false);

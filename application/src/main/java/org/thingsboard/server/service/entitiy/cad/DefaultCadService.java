@@ -15,18 +15,21 @@
  */
 package org.thingsboard.server.service.entitiy.cad;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 import org.thingsboard.server.common.data.id.TenantId;
 import org.thingsboard.server.config.CadConfig;
 import org.thingsboard.server.queue.util.TbCoreComponent;
 import org.thingsboard.server.service.install.InstallScripts;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.LinkOption;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +39,9 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -51,17 +56,21 @@ class DefaultCadService implements CadService {
             Pattern.CASE_INSENSITIVE
     );
 
-    private static final Pattern DWG_VERSION_PATTERN = Pattern.compile("AC10[0-9a-fA-F]{2}");
-    private static final List<String> ALLOWED_EXTENSIONS = List.of(".dwg", ".dxf");
-
     private final CadConfig cadConfig;
     private final ObjectMapper objectMapper;
     private final InstallScripts installScripts;
 
     private String resolvedScriptPath;
+    private final AtomicInteger activeConversions = new AtomicInteger();
+    private final Map<TenantId, Boolean> activeTenants = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void validateEnvironment() {
+        if (cadConfig.getMaxFileSizeMb() <= 0 || cadConfig.getMaxEntities() <= 0 ||
+                cadConfig.getMaxOutputSizeMb() <= 0 || cadConfig.getMaxConcurrentConversions() <= 0 ||
+                cadConfig.getConversionTimeoutSeconds() <= 0) {
+            throw new IllegalArgumentException("CAD conversion limits must be positive");
+        }
         resolvedScriptPath = resolveScriptPath();
         if (!Files.exists(Path.of(resolvedScriptPath))) {
             log.warn("CAD Python script not found at: {}", resolvedScriptPath);
@@ -79,104 +88,49 @@ class DefaultCadService implements CadService {
     }
 
     @Override
-    public CadConvertResult convertDwgToSvg(byte[] fileContent, String originalFilename, TenantId tenantId) {
-        validateFile(fileContent, originalFilename);
-
-        Path tempDir = null;
-        try {
-            tempDir = createTempDir(tenantId);
-            Path inputFile = tempDir.resolve(sanitizeFilename(originalFilename));
-            Files.write(inputFile, fileContent);
-
-            Path outputDir = tempDir.resolve("output");
-            Files.createDirectories(outputDir);
-
-            runPythonConversion(inputFile, outputDir);
-
-            return readConversionResults(outputDir);
-        } catch (IOException e) {
-            log.error("CAD conversion I/O error", e);
-            throw new RuntimeException("CAD conversion failed: I/O error");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("CAD conversion interrupted");
-        } finally {
-            cleanupTempDir(tempDir);
-        }
+    public CadConvertResult convertDwgToSvg(InputStream content, long size, String name, TenantId tenantId) {
+        return (CadConvertResult) convert(content, size, name, tenantId, false);
     }
 
     @Override
-    public CadPerEntityResult convertDwgToPerEntitySvg(byte[] fileContent, String originalFilename, TenantId tenantId) {
-        validateFile(fileContent, originalFilename);
+    public CadPerEntityResult convertDwgToPerEntitySvg(InputStream content, long size, String name, TenantId tenantId) {
+        return (CadPerEntityResult) convert(content, size, name, tenantId, true);
+    }
 
+    private Object convert(InputStream content, long size, String name, TenantId tenantId, boolean perEntity) {
+        if (activeConversions.incrementAndGet() > cadConfig.getMaxConcurrentConversions()) {
+            activeConversions.decrementAndGet();
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "CAD converter busy; retry after the active conversion finishes");
+        }
+        if (activeTenants.putIfAbsent(tenantId, Boolean.TRUE) != null) {
+            activeConversions.decrementAndGet();
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "A CAD conversion is already running for this tenant");
+        }
         Path tempDir = null;
         try {
             tempDir = createTempDir(tenantId);
-            Path inputFile = tempDir.resolve(sanitizeFilename(originalFilename));
-            Files.write(inputFile, fileContent);
-
-            Path outputDir = tempDir.resolve("output");
-            Files.createDirectories(outputDir);
-
-            runPythonConversionPerEntity(inputFile, outputDir);
-
-            return readPerEntityResults(outputDir);
+            Path inputFile = tempDir.resolve("input" + CadUploadIO.extension(name));
+            String sourceHash = CadUploadIO.copy(content, size, name, inputFile,
+                    (long) cadConfig.getMaxFileSizeMb() * 1024 * 1024);
+            Path outputDir = Files.createDirectories(tempDir.resolve("output"));
+            runPythonConversion(inputFile, outputDir, perEntity, sourceHash);
+            checkOutputBudget(outputDir);
+            if (perEntity) {
+                CadPerEntityResult result = readPerEntityResults(outputDir);
+                result.setSceneId(sourceHash);
+                return result;
+            }
+            return readConversionResults(outputDir);
         } catch (IOException e) {
-            log.error("CAD per-entity conversion I/O error", e);
-            throw new RuntimeException("CAD per-entity conversion failed: I/O error");
+            log.error("CAD conversion I/O error", e);
+            throw new RuntimeException("CAD conversion failed: I/O error", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("CAD per-entity conversion interrupted");
+            throw new RuntimeException("CAD conversion interrupted", e);
         } finally {
             cleanupTempDir(tempDir);
-        }
-    }
-
-    private void validateFile(byte[] fileContent, String originalFilename) {
-        if (originalFilename == null || originalFilename.isBlank()) {
-            throw new IllegalArgumentException("Filename is required");
-        }
-
-        String lowerName = originalFilename.toLowerCase();
-        boolean hasValidExtension = ALLOWED_EXTENSIONS.stream().anyMatch(lowerName::endsWith);
-        if (!hasValidExtension) {
-            throw new IllegalArgumentException("Unsupported file format. Only .dwg and .dxf files are accepted.");
-        }
-
-        if (fileContent == null || fileContent.length == 0) {
-            throw new IllegalArgumentException("File is empty");
-        }
-
-        int maxSizeBytes = cadConfig.getMaxFileSizeMb() * 1024 * 1024;
-        if (fileContent.length > maxSizeBytes) {
-            throw new IllegalArgumentException("File exceeds maximum size of " + cadConfig.getMaxFileSizeMb() + "MB");
-        }
-
-        if (lowerName.endsWith(".dwg")) {
-            validateDwgMagicBytes(fileContent);
-        } else {
-            validateDxfMagicBytes(fileContent);
-        }
-    }
-
-    private void validateDwgMagicBytes(byte[] content) {
-        if (content.length < 6) {
-            throw new IllegalArgumentException("File too small to be a valid DWG file");
-        }
-        String header = new String(content, 0, Math.min(content.length, 32), StandardCharsets.US_ASCII);
-        if (!DWG_VERSION_PATTERN.matcher(header).find()) {
-            throw new IllegalArgumentException("Not a valid DWG file: missing version signature");
-        }
-    }
-
-    private void validateDxfMagicBytes(byte[] content) {
-        String header = new String(content, 0, Math.min(content.length, 256), StandardCharsets.US_ASCII);
-        String firstLine = header.lines().findFirst().orElse("").trim();
-        if (!"0".equals(firstLine)) {
-            throw new IllegalArgumentException("Not a valid DXF file: missing section marker");
-        }
-        if (!header.contains("SECTION")) {
-            throw new IllegalArgumentException("Not a valid DXF file: missing SECTION declaration");
+            activeTenants.remove(tenantId);
+            activeConversions.decrementAndGet();
         }
     }
 
@@ -189,50 +143,61 @@ class DefaultCadService implements CadService {
         return Files.createTempDirectory(tenantDir, "cad-convert-");
     }
 
-    private void runPythonConversion(Path inputFile, Path outputDir) throws IOException, InterruptedException {
-        List<String> command = List.of(
-                cadConfig.getPythonPath(),
-                resolvedScriptPath,
-                inputFile.toString(),
-                "--invert",
-                "-o", outputDir.toString()
-        );
-
-        log.debug("Running CAD conversion: {}", String.join(" ", command));
-
-        Path stderrFile = outputDir.resolve("conversion.stderr");
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(false);
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        pb.redirectError(stderrFile.toFile());
-
-        int timeout = cadConfig.getConversionTimeoutSeconds();
-        Process process = pb.start();
-
-        boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            log.error("CAD conversion timed out after {} seconds", timeout);
-            throw new RuntimeException("CAD conversion timed out after " + timeout + " seconds");
-        }
-
-        String stderr = readStderrFile(stderrFile);
-        if (process.exitValue() != 0) {
-            log.error("Python conversion failed with exit code {}: {}", process.exitValue(), stderr);
-            throw new RuntimeException("CAD conversion failed");
+    private void runPythonConversion(Path inputFile, Path outputDir, boolean perEntity, String sourceHash)
+            throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(List.of(cadConfig.getPythonPath(), resolvedScriptPath, inputFile.toString()));
+        if (perEntity) command.addAll(List.of("--per-entity", "--max-entities", String.valueOf(cadConfig.getMaxEntities())));
+        else command.add("--invert");
+        command.addAll(List.of("-o", outputDir.toString()));
+        Path stderr = outputDir.resolve("conversion.stderr");
+        ProcessBuilder builder = new ProcessBuilder(command)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(stderr.toFile());
+        builder.environment().put("TB_CAD_SOURCE_SHA256", sourceHash);
+        builder.environment().put("TB_CAD_MAX_OUTPUT_BYTES", Long.toString((long) cadConfig.getMaxOutputSizeMb() * 1024 * 1024));
+        Process process = builder.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(cadConfig.getConversionTimeoutSeconds());
+        try {
+            while (!process.waitFor(1, TimeUnit.SECONDS)) {
+                if (System.nanoTime() >= deadline) throw new RuntimeException("CAD conversion timed out");
+                checkOutputBudget(outputDir);
+            }
+            if (process.exitValue() != 0) {
+                log.warn("CAD converter exited {}: {}", process.exitValue(), readStderrFile(stderr));
+                throw new RuntimeException("CAD conversion failed. Check file complexity, supported entities and converter configuration.");
+            }
+        } finally {
+            // Includes ODA descendants, not just the Python parent. Snapshot the
+            // descendants BEFORE killing the parent so they cannot become orphans.
+            if (process.isAlive()) {
+                var children = process.descendants().toList();
+                children.forEach(ProcessHandle::destroyForcibly);
+                process.destroyForcibly();
+                try { process.onExit().get(5, TimeUnit.SECONDS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                catch (Exception e) { log.warn("CAD process did not exit promptly", e); }
+            }
         }
     }
 
-    private String readStderrFile(Path stderrFile) {
-        if (!Files.exists(stderrFile)) {
-            return "";
+    private void checkOutputBudget(Path outputDir) throws IOException {
+        long limit = (long) cadConfig.getMaxOutputSizeMb() * 1024 * 1024;
+        long total = 0;
+        try (Stream<Path> files = Files.walk(outputDir)) {
+            var iterator = files.iterator();
+            while (iterator.hasNext()) {
+                Path path = iterator.next();
+                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    total += Files.size(path);
+                    if (total > limit) throw new IllegalArgumentException("CAD output exceeds the configured resource limit");
+                }
+            }
         }
-        try {
-            return Files.readString(stderrFile, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            log.warn("Failed to read conversion stderr file: {}", stderrFile, e);
-            return "";
-        }
+    }
+
+    private String readStderrFile(Path file) {
+        try (InputStream input = Files.newInputStream(file)) {
+            return new String(input.readNBytes(16 * 1024), StandardCharsets.UTF_8);
+        } catch (IOException e) { return ""; }
     }
 
     private CadConvertResult readConversionResults(Path outputDir) throws IOException {
@@ -269,159 +234,71 @@ class DefaultCadService implements CadService {
         return new CadConvertResult(previewBase64, blocks);
     }
 
-    private void runPythonConversionPerEntity(Path inputFile, Path outputDir) throws IOException, InterruptedException {
-        List<String> command = List.of(
-                cadConfig.getPythonPath(),
-                resolvedScriptPath,
-                inputFile.toString(),
-                "--per-entity",
-                "--max-entities", String.valueOf(cadConfig.getMaxEntities()),
-                "-o", outputDir.toString()
-        );
-
-        log.info("Running CAD per-entity conversion: {}", String.join(" ", command));
-
-        Path stderrFile = outputDir.resolve("conversion.stderr");
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(false);
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        pb.redirectError(stderrFile.toFile());
-
-        int timeout = cadConfig.getConversionTimeoutSeconds();
-        Process process = pb.start();
-
-        boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            log.error("CAD per-entity conversion timed out after {} seconds", timeout);
-            throw new RuntimeException("CAD per-entity conversion timed out after " + timeout + " seconds");
-        }
-
-        String stderr = readStderrFile(stderrFile);
-        if (process.exitValue() != 0) {
-            log.error("Python per-entity conversion failed with exit code {}: {}", process.exitValue(), stderr);
-            throw new RuntimeException("CAD per-entity conversion failed (exit code " + process.exitValue() + "): " + stderr);
-        }
-    }
-
-    @SuppressWarnings("unchecked")
     private CadPerEntityResult readPerEntityResults(Path outputDir) throws IOException {
-        Path previewFile = outputDir.resolve("preview.svg");
-        String previewBase64 = "";
-        if (Files.exists(previewFile)) {
-            previewBase64 = Base64.getEncoder().encodeToString(Files.readAllBytes(previewFile));
-        }
-
         Path manifestFile = outputDir.resolve("manifest.json");
-        List<CadEntityInfo> entities = new ArrayList<>();
-        CadPerEntityResult.ModelspaceBounds msBounds = null;
-        CadPerEntityResult.PreviewTransform previewTransform = null;
-        if (Files.exists(manifestFile)) {
-            String manifestJson = Files.readString(manifestFile, StandardCharsets.UTF_8);
-            List<Map<String, Object>> manifestList;
-            try {
-                Map<String, Object> manifestObj = objectMapper.readValue(manifestJson, new TypeReference<Map<String, Object>>() {});
-                Object entitiesField = manifestObj.get("entities");
-                if (entitiesField instanceof List) {
-                    manifestList = (List<Map<String, Object>>) entitiesField;
-                } else {
-                    log.warn("manifest.json 'entities' field is missing or not an array; got: {}", entitiesField);
-                    manifestList = List.of();
-                }
-                Object msBoundsField = manifestObj.get("modelspaceBounds");
-                if (msBoundsField instanceof Map) {
-                    Map<String, Object> b = (Map<String, Object>) msBoundsField;
-                    msBounds = new CadPerEntityResult.ModelspaceBounds(
-                            toDouble(b.get("minX")), toDouble(b.get("maxX")),
-                            toDouble(b.get("minY")), toDouble(b.get("maxY"))
-                    );
-                }
-                Object transformField = manifestObj.get("previewViewBox");
-                if (transformField instanceof Map) {
-                    Map<String, Object> t = (Map<String, Object>) transformField;
-                    previewTransform = new CadPerEntityResult.PreviewTransform(
-                            toDouble(t.get("x")), toDouble(t.get("y")),
-                            toDouble(t.get("width")), toDouble(t.get("height")),
-                            toDouble(manifestObj.get("scale")),
-                            toDouble(manifestObj.get("translateX")),
-                            toDouble(manifestObj.get("translateY")),
-                            manifestObj.get("yFlip") instanceof Boolean ? (Boolean) manifestObj.get("yFlip") : true
-                    );
-                }
-            } catch (ClassCastException e) {
-                log.warn("Unexpected manifest.json structure, trying legacy array format", e);
-                manifestList = objectMapper.readValue(manifestJson, new TypeReference<List<Map<String, Object>>>() {});
-            }
-
-            int maxEntities = cadConfig.getMaxEntities();
-            int count = 0;
-            for (Map<String, Object> entry : manifestList) {
-                if (count >= maxEntities) {
-                    log.warn("Per-entity manifest exceeds maxEntities limit ({}), truncating", maxEntities);
-                    break;
-                }
-
-                String svgFile = (String) entry.get("svgFile");
-                if (svgFile == null) {
-                    continue;
-                }
-
-                Path svgPath = outputDir.resolve(svgFile).normalize();
-                if (!svgPath.startsWith(outputDir)) {
-                    log.warn("Path traversal attempt in manifest entry, skipping: {}", svgFile);
-                    continue;
-                }
-                if (!Files.exists(svgPath)) {
-                    log.warn("Entity SVG file not found: {}", svgPath);
-                    continue;
-                }
-
-                String svgContent = Files.readString(svgPath, StandardCharsets.UTF_8);
-                if (containsUnsafeContent(svgContent)) {
-                    log.warn("Skipping entity with unsafe SVG content: {}", svgFile);
-                    continue;
-                }
-
-                String svgBase64 = Base64.getEncoder().encodeToString(svgContent.getBytes(StandardCharsets.UTF_8));
-
-                String id = String.valueOf(entry.getOrDefault("id", ""));
-                String type = String.valueOf(entry.getOrDefault("type", ""));
-                double x = toDouble(entry.get("x"));
-                double y = toDouble(entry.get("y"));
-                double width = toDouble(entry.get("width"));
-                double height = toDouble(entry.get("height"));
-                String blockName = entry.get("blockName") != null ? String.valueOf(entry.get("blockName")) : null;
-                double previewX = entry.containsKey("previewX") ? toDouble(entry.get("previewX")) : x;
-                double previewY = entry.containsKey("previewY") ? toDouble(entry.get("previewY")) : y;
-                double previewWidth = entry.containsKey("previewWidth") ? toDouble(entry.get("previewWidth")) : width;
-                double previewHeight = entry.containsKey("previewHeight") ? toDouble(entry.get("previewHeight")) : height;
-
-                entities.add(new CadEntityInfo(id, type, svgBase64, x, y, width, height, blockName,
-                        previewX, previewY, previewWidth, previewHeight));
-                count++;
-            }
+        if (!Files.isRegularFile(manifestFile)) throw new IOException("CAD manifest is missing");
+        var manifest = objectMapper.readTree(manifestFile.toFile());
+        var entries = manifest.isArray() ? manifest : manifest.path("entities");
+        if (!entries.isArray() || entries.size() > cadConfig.getMaxEntities()) {
+            throw new IOException("Invalid CAD manifest or entity limit exceeded");
         }
-
-        return new CadPerEntityResult(previewBase64, entities, msBounds, previewTransform);
+        List<CadEntityInfo> entities = new ArrayList<>();
+        var ids = new java.util.HashSet<String>();
+        for (var entry : entries) {
+            String id = entry.path("id").asText();
+            if (id.isEmpty() || !ids.add(id)) throw new IOException("Duplicate or missing CAD instance identity");
+            Path svgPath = outputDir.resolve(entry.path("svgFile").asText()).normalize();
+            if (!svgPath.startsWith(outputDir) || !Files.isRegularFile(svgPath, LinkOption.NOFOLLOW_LINKS) ||
+                    !svgPath.toRealPath().startsWith(outputDir.toRealPath())) throw new IOException("Invalid CAD entity resource path");
+            if (Files.size(svgPath) > 4 * 1024 * 1024) throw new IOException("A single CAD instance is too complex; split this block before import");
+            String svgContent = Files.readString(svgPath, StandardCharsets.UTF_8);
+            if (containsUnsafeContent(svgContent)) throw new IOException("Unsafe CAD entity resource");
+            var entity = new CadEntityInfo(id, entry.path("type").asText(),
+                    Base64.getEncoder().encodeToString(svgContent.getBytes(StandardCharsets.UTF_8)),
+                    finite(entry, "x"), finite(entry, "y"), finite(entry, "width"), finite(entry, "height"),
+                    entry.path("blockName").isNull() ? null : entry.path("blockName").asText(),
+                    finite(entry, "previewX"), finite(entry, "previewY"),
+                    finite(entry, "previewWidth"), finite(entry, "previewHeight"));
+            if (entity.getPreviewWidth() <= 0 || entity.getPreviewHeight() <= 0) throw new IOException("Invalid CAD entity bounds");
+            entity.setHandle(entry.path("handle").asText());
+            entity.setLayer(entry.path("layer").asText());
+            entities.add(entity);
+        }
+        CadPerEntityResult result = new CadPerEntityResult();
+        result.setManifest(entities);
+        result.setSchemaVersion(manifest.path("schemaVersion").asInt(1));
+        result.setSourceEntityCount(manifest.path("sourceEntityCount").asInt(entities.size()));
+        result.setUnrenderedEntityCount(manifest.path("unrenderedEntityCount").asInt());
+        result.setSkippedPrimitiveCount(manifest.path("skippedCount").asInt());
+        // v2 preview is reconstructed from the canonical entity resources. Avoid
+        // transmitting a second copy of the complete drawing as base64 JSON.
+        Path preview = outputDir.resolve("preview.svg");
+        result.setPreviewSvgBase64(result.getSchemaVersion() >= 2 || !Files.exists(preview) ? "" :
+                Base64.getEncoder().encodeToString(Files.readAllBytes(preview)));
+        if (!entities.isEmpty()) {
+            var bounds = manifest.path("modelspaceBounds");
+            result.setModelspaceBounds(new CadPerEntityResult.ModelspaceBounds(
+                    finite(bounds, "minX"), finite(bounds, "maxX"), finite(bounds, "minY"), finite(bounds, "maxY")));
+            var box = manifest.path("previewViewBox");
+            double width = finite(box, "width"), height = finite(box, "height");
+            if (width <= 0 || height <= 0) throw new IOException("Invalid CAD scene frame");
+            result.setPreviewTransform(new CadPerEntityResult.PreviewTransform(
+                    finite(box, "x"), finite(box, "y"), width, height,
+                    finite(manifest, "scale"), finite(manifest, "translateX"), finite(manifest, "translateY"),
+                    manifest.path("yFlip").asBoolean(true)));
+        }
+        return result;
     }
 
-    private double toDouble(Object value) {
-        if (value instanceof Number n) {
-            return n.doubleValue();
+    private double finite(com.fasterxml.jackson.databind.JsonNode node, String field) throws IOException {
+        if (!node.path(field).isNumber() || !Double.isFinite(node.path(field).doubleValue())) {
+            throw new IOException("Missing or non-finite CAD coordinate: " + field);
         }
-        return 0.0;
+        return node.path(field).doubleValue();
     }
 
     private boolean containsUnsafeContent(String svgContent) {
         return SVG_SCRIPT_PATTERN.matcher(svgContent).find();
-    }
-
-    private String sanitizeFilename(String filename) {
-        String sanitized = filename.replaceAll("[^a-zA-Z0-9._-]", "_");
-        if (sanitized.isEmpty() || sanitized.equals(".")) {
-            return "cad-file";
-        }
-        return sanitized;
     }
 
     private void cleanupTempDir(Path tempDir) {

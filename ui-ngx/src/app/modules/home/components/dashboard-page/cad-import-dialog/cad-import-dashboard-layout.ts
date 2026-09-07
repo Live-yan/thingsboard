@@ -14,7 +14,7 @@
 /// limitations under the License.
 ///
 
-import { DashboardLayout, GridSettings, LayoutType, WidgetLayouts } from '@shared/models/dashboard.models';
+import type { DashboardLayout, GridSettings, LayoutType, WidgetLayouts } from '@shared/models/dashboard.models';
 
 export interface CadImportGridSettingsResult {
   targetColumns: number;
@@ -36,7 +36,7 @@ const CAD_IMPORT_ROW_HEIGHT_BASE = 50;
 
 export function applyCadImportGridSettings(layout: DashboardLayout, result: CadImportGridSettingsResult): GridSettings {
   layout.gridSettings = layout.gridSettings || {};
-  layout.gridSettings.layoutType = LayoutType.scada;
+  layout.gridSettings.layoutType = 'scada' as LayoutType;
   layout.gridSettings.columns = result.targetColumns;
   layout.gridSettings.margin = 0;
   layout.gridSettings.outerMargin = false;

@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "dwg_to_svg.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("dwg_to_svg", MODULE_PATH)
 DWG_TO_SVG = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

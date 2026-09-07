@@ -31,6 +31,20 @@ public class CadPerEntityResult {
     private ModelspaceBounds modelspaceBounds;
     private PreviewTransform previewTransform;
 
+    private String sceneId;
+    private int schemaVersion;
+    private int sourceEntityCount;
+    private int unrenderedEntityCount;
+    private int skippedPrimitiveCount;
+
+    public CadPerEntityResult(String preview, List<CadEntityInfo> manifest,
+                              ModelspaceBounds bounds, PreviewTransform transform) {
+        this.previewSvgBase64 = preview;
+        this.manifest = manifest;
+        this.modelspaceBounds = bounds;
+        this.previewTransform = transform;
+    }
+
     @Data
     @AllArgsConstructor
     @NoArgsConstructor

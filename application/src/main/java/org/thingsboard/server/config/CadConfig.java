@@ -30,5 +30,7 @@ public class CadConfig {
     private int maxFileSizeMb = 50;
     private String tempDir;
     private int maxEntities = 5000;
+    private int maxConcurrentConversions = 2;
+    private int maxOutputSizeMb = 64;
 
 }

@@ -16,6 +16,11 @@
 
 export interface CadPerEntityResult {
   previewSvgBase64: string;
+  schemaVersion?: number;
+  sceneId?: string;
+  sourceEntityCount?: number;
+  unrenderedEntityCount?: number;
+  skippedPrimitiveCount?: number;
   manifest: CadEntityInfo[];
   modelspaceBounds?: { minX: number; maxX: number; minY: number; maxY: number };
   previewTransform?: PreviewTransform;
@@ -41,6 +46,8 @@ export interface CadEntityInfo {
   width: number;
   height: number;
   blockName?: string | null;
+  handle?: string;
+  layer?: string;
   previewX?: number;
   previewY?: number;
   previewWidth?: number;

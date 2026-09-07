@@ -14,74 +14,62 @@
 /// limitations under the License.
 ///
 
-export interface WidgetBatchItem {
-  widget: any;
-  row: number;
-  col: number;
+/** Bounded dashboard insertion. Keep source order and refresh only after the last item. */
+export interface CadFrameBatchOptions {
+  batchSize?: number;
+  frameBudgetMs?: number;
+  requestFrame?: (callback: () => void) => number;
+  cancelFrame?: (handle: number) => void;
+  now?: () => number;
 }
 
-export const CAD_IMPORT_WIDGET_BATCH_SIZE = 25;
-
-export function insertWidgetsInFrames<TContext>(
-  items: WidgetBatchItem[],
-  context: TContext,
-  insertFn: (context: TContext, item: WidgetBatchItem, batchIndex: number) => void,
-  batchCompleteFn: (context: TContext, batchIndex: number) => void,
-  allCompleteFn: (context: TContext) => void,
-  batchSize: number = CAD_IMPORT_WIDGET_BATCH_SIZE,
-  requestAnimationFrameFn: (cb: () => void) => number = requestAnimationFrame,
-  cancelAnimationFrameFn?: (id: number) => void
-): { cancel: () => void; promise: Promise<void> } {
-  const cancelFn = cancelAnimationFrameFn ?? (() => {});
-  let cancelled = false;
-  let rafId: number | null = null;
-
-  const promise = new Promise<void>((resolve) => {
-    let currentIndex = 0;
-    let batchIndex = 0;
-
-    const processBatch = (): void => {
-      if (cancelled) {
-        resolve();
-        return;
-      }
-
-      const start = currentIndex;
-      const end = Math.min(start + batchSize, items.length);
-
-      for (let i = start; i < end; i++) {
-        insertFn(context, items[i], batchIndex);
-      }
-      currentIndex = end;
-
-      batchCompleteFn(context, batchIndex);
-      batchIndex++;
-
-      if (currentIndex < items.length) {
-        rafId = requestAnimationFrameFn(processBatch);
-      } else {
-        rafId = null;
-        allCompleteFn(context);
-        resolve();
-      }
-    };
-
-    if (items.length === 0) {
-      allCompleteFn(context);
-      resolve();
-      return;
+export function insertWidgetsInFrames<T, S>(
+  items: readonly T[],
+  context: S,
+  insert: (context: S, item: T) => void,
+  onBatch: (context: S, batchIndex: number) => void,
+  onComplete: (context: S) => void,
+  options: CadFrameBatchOptions = {}
+): { cancel(): void } {
+  const batchSize = options.batchSize ?? 32;
+  const budget = options.frameBudgetMs ?? 8;
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || !Number.isFinite(budget) || budget <= 0) {
+    throw new Error('CAD insertion batch size and frame budget must be positive');
+  }
+  const request = options.requestFrame ?? (callback => window.requestAnimationFrame(callback));
+  const cancel = options.cancelFrame ?? (handle => window.cancelAnimationFrame(handle));
+  const now = options.now ?? (() => performance.now());
+  let index = 0;
+  let batchIndex = 0;
+  let stopped = false;
+  let pending: number | null = null;
+  const tick = () => {
+    pending = null;
+    if (stopped) return;
+    const started = now();
+    let count = 0;
+    // Always advance by at least one item; no giant synchronous insertion loop.
+    while (!stopped && index < items.length && count < batchSize && (count === 0 || now() - started < budget)) {
+      insert(context, items[index]);
+      index++;
+      count++;
     }
-
-    rafId = requestAnimationFrameFn(processBatch);
-  });
-
-  const cancel = (): void => {
-    cancelled = true;
-    if (rafId !== null) {
-      cancelFn(rafId);
-      rafId = null;
+    if (stopped) return;
+    if (count) onBatch(context, batchIndex++);
+    if (stopped) return;
+    if (index === items.length) {
+      stopped = true;
+      onComplete(context);
+    } else {
+      pending = request(tick);
     }
   };
-
-  return { cancel, promise };
+  pending = request(tick);
+  return {
+    cancel() {
+      stopped = true;
+      if (pending !== null) cancel(pending);
+      pending = null;
+    }
+  };
 }

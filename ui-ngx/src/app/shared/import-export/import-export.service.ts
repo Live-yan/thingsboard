@@ -15,7 +15,7 @@
 ///
 
 import { Inject, Injectable, DOCUMENT } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpEventType } from '@angular/common/http';
 import { DashboardService } from '@core/http/dashboard.service';
 import { TranslateService } from '@ngx-translate/core';
 import { select, Store } from '@ngrx/store';
@@ -34,7 +34,7 @@ import {
 } from '@shared/models/alias.models';
 import { MatDialog } from '@angular/material/dialog';
 import { ImportDialogComponent, ImportDialogData } from '@shared/import-export/import-dialog.component';
-import { forkJoin, Observable, of, Subject } from 'rxjs';
+import { forkJoin, Observable, of, Subject, Subscription } from 'rxjs';
 import { catchError, map, mergeMap, switchMap, take, tap } from 'rxjs/operators';
 import { DashboardUtilsService } from '@core/services/dashboard-utils.service';
 import { EntityService } from '@core/http/entity.service';
@@ -206,44 +206,60 @@ export class ImportExportService {
     });
   }
 
-  public importCadFilePerEntity(): Observable<CadPerEntityResult> {
+  public importCadFilePerEntity(onProgress?: (percent: number | null) => void): Observable<CadPerEntityResult> {
     return new Observable<CadPerEntityResult>(subscriber => {
       const input = this.document.createElement('input');
       input.type = 'file';
       input.accept = '.dwg,.dxf';
       let fileSelected = false;
-      let completed = false;
+      let request: Subscription | undefined;
+      const view = this.document.defaultView;
+      let focusTimer: number | undefined;
+      let attachTimer: number | undefined;
       const completeWithoutFile = () => {
-        if (!completed && !fileSelected && !input.files?.length) {
-          completed = true;
+        if (!subscriber.closed && !fileSelected && !input.files?.length) {
           subscriber.next(null as any);
           subscriber.complete();
         }
       };
+      const onFocus = () => { focusTimer = view?.setTimeout(completeWithoutFile, 300); };
+      input.oncancel = completeWithoutFile;
       input.onchange = () => {
-        if (completed) {
-          return;
-        }
+        if (subscriber.closed || fileSelected) return;
         const file = input.files?.[0];
         if (!file) { completeWithoutFile(); return; }
         fileSelected = true;
         const formData = new FormData();
+        // Pass the browser File directly; never read a large upload as base64.
         formData.append('file', file, file.name);
-        this.http.post<CadPerEntityResult>('/api/cad/convert-per-entity', formData,
-          defaultHttpUploadOptions(false, false, false)).subscribe({
-            next: result => {
-              completed = true;
-              subscriber.next(result);
+        request = this.http.post<CadPerEntityResult>('/api/cad/convert-per-entity', formData, {
+          ...defaultHttpUploadOptions(false, false, false), observe: 'events', reportProgress: true
+        }).subscribe({
+          next: event => {
+            if (event.type === HttpEventType.UploadProgress) {
+              const percent = event.total ? Math.round(100 * event.loaded / event.total) : null;
+              onProgress?.(percent);
+            } else if (event.type === HttpEventType.Response) {
+              subscriber.next(event.body!);
               subscriber.complete();
-            },
-            error: err => subscriber.error(err)
-          });
+            }
+          },
+          error: error => subscriber.error(error)
+        });
       };
       input.click();
-      this.document.defaultView?.setTimeout(() => {
-        const onFocus = () => this.document.defaultView?.setTimeout(completeWithoutFile, 300);
-        this.document.defaultView?.addEventListener('focus', onFocus, { once: true });
-      }, 0);
+      if (!subscriber.closed) attachTimer = view?.setTimeout(() => view.addEventListener('focus', onFocus, { once: true }), 0);
+      // Closing the dialog cancels the XHR upload and removes picker listeners.
+      // A conversion already running on the server remains bounded by its timeout.
+      return () => {
+        request?.unsubscribe();
+        view?.removeEventListener('focus', onFocus);
+        if (focusTimer !== undefined) view?.clearTimeout(focusTimer);
+        if (attachTimer !== undefined) view?.clearTimeout(attachTimer);
+        input.onchange = null;
+        input.oncancel = null;
+        input.remove();
+      };
     });
   }
 

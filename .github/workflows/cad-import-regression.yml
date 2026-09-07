@@ -1,0 +1,117 @@
+#
+# Copyright © 2016-2026 The Thingsboard Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: CAD import regression
+on:
+  pull_request:
+    paths:
+      - 'application/src/main/data/scripts/cad/**'
+      - 'application/src/main/java/org/thingsboard/server/service/entitiy/cad/**'
+      - 'application/src/main/java/org/thingsboard/server/controller/CadController.java'
+      - 'application/src/main/java/org/thingsboard/server/config/CadConfig.java'
+      - 'ui-ngx/src/**'
+      - 'tests/cad/**'
+      - '.github/workflows/cad-import-regression.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'application/src/main/data/scripts/cad/**'
+      - 'ui-ngx/src/app/modules/home/components/dashboard-page/**'
+      - 'tests/cad/**'
+      - '.github/workflows/cad-import-regression.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cad-import-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cad-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CAD_TEST_ARTIFACTS: ${{ github.workspace }}/cad-test-artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Install isolated CAD test tools
+        id: tools
+        run: |
+          python -m pip install ezdxf==1.4.4 Pillow==11.3.0 pytest==9.0.2 playwright==1.57.0
+          python -m playwright install --with-deps chromium
+          npm install --prefix "$RUNNER_TEMP/cad-tools" --no-audit --no-fund typescript@5.9.3 ts-node@10.9.2 tslib@2.8.1
+          echo "$RUNNER_TEMP/cad-tools/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "NODE_PATH=$RUNNER_TEMP/cad-tools/node_modules" >> "$GITHUB_ENV"
+      - name: Existing Python converter regressions
+        run: python -m unittest discover -s application/src/main/data/scripts/cad/tests -v
+      - name: All standalone CAD TypeScript specifications
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory=ui-ngx/src/app/modules/home/components/dashboard-page/cad-import-dialog
+          mapfile -t specs < <(find "$directory" -name 'cad*.spec.ts' -type f | sort)
+          test "${#specs[@]}" -gt 0
+          failed=0
+          for spec in "${specs[@]}"; do
+            echo "Running $spec"
+            ts-node --transpile-only --compiler-options '{"module":"CommonJS","moduleResolution":"node","target":"es2020","esModuleInterop":true}' "$spec" || failed=1
+          done
+          exit "$failed"
+      - name: Browser scene and real DXF contract regressions
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: python -m pytest -q tests/cad --junitxml=cad-test-artifacts/results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cad-regression-results
+          path: cad-test-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  ui-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui-ngx
+    env:
+      NODE_OPTIONS: --max_old_space_size=6144
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+          cache-dependency-path: ui-ngx/yarn.lock
+      - name: Install repository UI dependencies
+        run: yarn install --frozen-lockfile --non-interactive --network-concurrency 4 --network-timeout 100000
+      - name: Generate repository type definitions
+        run: yarn build:types
+      - name: Compile Angular application and templates
+        run: yarn ngc -p src/tsconfig.app.json --noEmit

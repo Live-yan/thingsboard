@@ -15,165 +15,82 @@
 ///
 
 import assert from 'node:assert/strict';
-import {
-  insertWidgetsInFrames,
-  WidgetBatchItem
-} from './cad-import-frame-batch';
+import { insertWidgetsInFrames } from './cad-import-frame-batch';
 
-interface TestContext {
-  inserted: { row: number; col: number; batchIndex: number }[];
-  batchStartIndices: number[];
-  allCompleteCalled: boolean;
-}
-
-function makeItems(count: number): WidgetBatchItem[] {
-  return Array.from({length: count}, (_, i) => ({
-    widget: {id: `widget-${i}`},
-    row: i * 2,
-    col: i * 3
-  }));
-}
-
-function makeContext(): TestContext {
-  return { inserted: [], batchStartIndices: [], allCompleteCalled: false };
-}
-
-function insertFn(ctx: TestContext, item: WidgetBatchItem, batchIndex: number): void {
-  ctx.inserted.push({ row: item.row, col: item.col, batchIndex });
-}
-
-function batchCompleteFn(ctx: TestContext, batchIndex: number): void {
-  ctx.batchStartIndices.push(batchIndex);
-}
-
-function allCompleteFn(ctx: TestContext): void {
-  ctx.allCompleteCalled = true;
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(5);
-  const rAF = (cb: () => void) => { cb(); return 1; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.equal(ctx.inserted.length, 5);
-    assert.equal(ctx.batchStartIndices.length, 1);
-    assert.equal(ctx.batchStartIndices[0], 0);
-    assert.ok(ctx.allCompleteCalled);
-    assert.equal(ctx.inserted[0].row, 0);
-    assert.equal(ctx.inserted[4].row, 8);
-    assert.equal(ctx.inserted[0].batchIndex, 0);
-    console.log('PASS: small batch (5 items) processes in one frame');
-  });
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(60);
-  let rafCounter = 0;
-  const rAF = (cb: () => void) => { rafCounter++; cb(); return rafCounter; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.equal(ctx.inserted.length, 60);
-    assert.equal(ctx.batchStartIndices.length, 3);
-    assert.deepEqual(ctx.batchStartIndices, [0, 1, 2]);
-    assert.ok(ctx.allCompleteCalled);
-    assert.equal(rafCounter, 3);
-    console.log('PASS: large batch (60 items, batchSize=25) processes across 3 frames');
-  });
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(52);
-  const rAF = (cb: () => void) => { cb(); return 1; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.equal(ctx.inserted[0].row, 0);
-    assert.equal(ctx.inserted[0].col, 0);
-    assert.equal(ctx.inserted[25].row, 50);
-    assert.equal(ctx.inserted[25].col, 75);
-    assert.equal(ctx.inserted[51].row, 102);
-    assert.equal(ctx.inserted[51].col, 153);
-    console.log('PASS: widget order is preserved across batches');
-  });
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(30);
-  let rafCount = 0;
-  const rAF = (cb: () => void) => { rafCount++; cb(); return rafCount; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.equal(ctx.batchStartIndices.length, 2);
-    assert.equal(ctx.batchStartIndices[0], 0);
-    assert.equal(ctx.batchStartIndices[1], 1);
-    assert.ok(ctx.allCompleteCalled);
-    console.log('PASS: batchCompleteFn called after each frame');
-  });
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(25);
-  const rAF = (cb: () => void) => { cb(); return 1; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.ok(ctx.allCompleteCalled);
-    assert.equal(ctx.inserted.length, 25);
-    console.log('PASS: allCompleteFn called after all items processed');
-  });
-}
-
-{
-  const ctx = makeContext();
-  const items = makeItems(100);
-  let rafCounter = 0;
-  const scheduledCbs: Array<() => void> = [];
-  const rAF = (cb: () => void) => {
-    rafCounter++;
-    scheduledCbs.push(cb);
-    return rafCounter;
+function scheduler() {
+  const queue = new Map<number, () => void>();
+  let next = 0;
+  let time = 0;
+  return {
+    options: {
+      requestFrame: (callback: () => void) => { queue.set(++next, callback); return next; },
+      cancelFrame: (handle: number) => { queue.delete(handle); },
+      now: () => time
+    },
+    work(ms: number) { time += ms; },
+    get pending() { return queue.size; },
+    tick() {
+      const entry = queue.entries().next().value;
+      assert.ok(entry, 'expected another animation frame');
+      queue.delete(entry[0]);
+      entry[1]();
+    }
   };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF, () => {});
-  scheduledCbs[0]();
-  scheduledCbs[1]();
-  handle.cancel();
-  scheduledCbs[2]();
-  handle.promise.then(() => {
-    assert.equal(ctx.inserted.length, 50);
-    assert.equal(ctx.batchStartIndices.length, 2);
-    assert.ok(!ctx.allCompleteCalled);
-    console.log('PASS: cancel() stops remaining work');
-  });
 }
 
-{
-  const ctx = makeContext();
-  const items = makeItems(40);
-  let rafCounter = 0;
-  const rAF = (cb: () => void) => { rafCounter++; cb(); return rafCounter; };
-  const customBatchSize = 10;
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, customBatchSize, rAF);
-  handle.promise.then(() => {
-    assert.equal(ctx.inserted.length, 40);
-    assert.equal(ctx.batchStartIndices.length, 4);
-    assert.equal(rafCounter, 4);
-    assert.ok(ctx.allCompleteCalled);
-    console.log('PASS: custom batch size works (10 items per frame)');
-  });
-}
+const frames = scheduler();
+const state = { inserted: [] as number[], batches: [] as number[], completed: 0 };
+const input = Array.from({length: 5000}, (_, index) => index);
+insertWidgetsInFrames(input, state,
+  (self, item) => { self.inserted.push(item); frames.work(3); },
+  (self, batch) => self.batches.push(batch),
+  self => self.completed++, frames.options);
+assert.equal(state.inserted.length, 0, 'initial insertion must yield');
+frames.tick();
+assert.equal(state.inserted.length, 3, 'work must stop at the frame budget');
+assert.equal(state.completed, 0);
+while (frames.pending) frames.tick();
+assert.deepEqual(state.inserted, input, 'insertion order must match source order');
+assert.equal(state.completed, 1);
+assert.deepEqual(state.batches, state.batches.map((_, index) => index));
 
-{
-  const ctx = makeContext();
-  const items = makeItems(0);
-  const rAF = (cb: () => void) => { cb(); return 1; };
-  const handle = insertWidgetsInFrames(items, ctx, insertFn, batchCompleteFn, allCompleteFn, 25, rAF);
-  handle.promise.then(() => {
-    assert.ok(ctx.allCompleteCalled);
-    assert.equal(ctx.inserted.length, 0);
-    assert.equal(ctx.batchStartIndices.length, 0);
-    console.log('PASS: empty batch completes immediately');
-  });
+const cheap = scheduler();
+let count = 0;
+insertWidgetsInFrames(input, null, () => count++, () => {}, () => {}, cheap.options);
+cheap.tick();
+assert.equal(count, 32, 'cheap items are also limited by a batch-size cap');
+
+const canceled = scheduler();
+let canceledComplete = false;
+const operation = insertWidgetsInFrames(input, null, () => {}, () => {},
+  () => { canceledComplete = true; }, canceled.options);
+operation.cancel();
+operation.cancel();
+assert.equal(canceled.pending, 0);
+assert.equal(canceledComplete, false);
+
+const during = scheduler();
+let duringCount = 0;
+const mid = insertWidgetsInFrames(input, null, () => { duringCount++; mid.cancel(); },
+  () => assert.fail('no batch callback after cancellation'),
+  () => assert.fail('no completion after cancellation'), during.options);
+during.tick();
+assert.equal(duringCount, 1);
+assert.equal(during.pending, 0);
+
+const empty = scheduler();
+let emptyCount = 0;
+insertWidgetsInFrames([], null, () => assert.fail('empty input'),
+  () => assert.fail('empty batch'), () => emptyCount++, empty.options);
+empty.tick();
+assert.equal(emptyCount, 1);
+assert.equal(empty.pending, 0);
+
+const failed = scheduler();
+insertWidgetsInFrames([1, 2], null, () => { throw new Error('insertion failed'); },
+  () => assert.fail('failed batch'), () => assert.fail('failed completion'), failed.options);
+assert.throws(() => failed.tick(), /insertion failed/);
+assert.equal(failed.pending, 0, 'do not continue or report success after insertion failure');
+for (const options of [{batchSize: 0}, {batchSize: Infinity}, {batchSize: 1.5}, {frameBudgetMs: -1}]) {
+  assert.throws(() => insertWidgetsInFrames([], null, () => {}, () => {}, () => {}, options), /must be positive/);
 }

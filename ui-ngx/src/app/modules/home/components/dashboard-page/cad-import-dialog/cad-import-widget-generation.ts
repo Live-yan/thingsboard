@@ -14,6 +14,8 @@
 /// limitations under the License.
 ///
 
+import { buildCadSvgBase64, validateCadSvgBounds } from './cad-import-svg';
+
 export interface CadImportWidgetPlanInput {
   importEntityCount: number;
 }
@@ -69,7 +71,7 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   deletedEntityIds: Set<string>;
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
-  /** When supplied, all unmapped entities are merged into ONE composite item using this preview viewBox. */
+  /** Unmapped entities form one static background occupying this entire frame. */
   previewViewBox?: { x: number; y: number; width: number; height: number };
 }
 
@@ -104,55 +106,27 @@ function unionBounds<T>(
   };
 }
 
-function decodeBase64Safe(value: string): string {
-  if (!value) return '';
-  try { return atob(value); } catch { return ''; }
-}
-
-function stripOuterSvg(svg: string): string {
-  let s = svg.trim();
-  if (s.startsWith('<?xml')) {
-    const end = s.indexOf('?>');
-    if (end !== -1) s = s.slice(end + 2).trim();
-  }
-  s = s.replace(/<tb:metadata[\s\S]*?<\/tb:metadata>/g, '');
-  const openIdx = s.indexOf('<svg');
-  if (openIdx === -1) return s;
-  const openEnd = s.indexOf('>', openIdx);
-  if (openEnd === -1) return s;
-  const closeIdx = s.lastIndexOf('</svg>');
-  if (closeIdx === -1 || closeIdx <= openEnd) return s;
-  return s.slice(openEnd + 1, closeIdx).trim();
-}
-
-function buildCompositeSvgBase64(
-  entities: CadImportWidgetEntity[],
-  viewBox: { x: number; y: number; width: number; height: number }
-): string {
-  const parts: string[] = [];
-  for (const entity of entities) {
-    const inner = stripOuterSvg(decodeBase64Safe(entity.svgBase64));
-    if (inner) parts.push(inner);
-  }
-  const vb = `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`;
-  const merged = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:tb="https://thingsboard.io/svg" viewBox="${vb}">${parts.join('\n')}</svg>`;
-  try { return btoa(merged); } catch { return ''; }
-}
-
 export function buildCadImportWidgetItems<TWidgetInfo = any>(
   input: CadImportWidgetItemsInput<TWidgetInfo>
 ): CadImportWidgetItem<TWidgetInfo>[] {
+  if (input.previewViewBox) validateCadSvgBounds(input.previewViewBox);
   const order = new Map(input.entities.map((entity, index) => [entity.id, index]));
   const entityById = new Map(input.entities.map(entity => [entity.id, entity]));
+  if (entityById.size !== input.entities.length) throw new Error('Duplicate CAD entity ids.');
   const groupByFirstEntityId = new Map<string, CadImportGroupMapping<TWidgetInfo>>();
   const groupedEntityIds = new Set<string>();
 
   for (const group of input.groupMappings) {
-    const entityIds = group.entityIds
+    const entityIds = [...new Set(group.entityIds)]
       .filter(id => entityById.has(id) && !input.deletedEntityIds.has(id))
       .sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
     if (entityIds.length < 2) {
       continue;
+    }
+    // A stale/imported mapping scheme must not duplicate a device or silently
+    // discard another group's members. Let the user resolve the ambiguity.
+    if (entityIds.some(id => groupedEntityIds.has(id))) {
+      throw new Error('Overlapping CAD group mappings. Remove the conflicting mapping before importing.');
     }
     const normalizedGroup = { ...group, entityIds };
     groupByFirstEntityId.set(entityIds[0], normalizedGroup);
@@ -182,67 +156,41 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(
     }
     const mapping = input.entityMappings.get(entity.id) || null;
     if (mapping) {
-      items.push({
-        id: entity.id,
-        entityIds: [entity.id],
-        entity,
-        mapping
-      });
+      items.push({ id: entity.id, entityIds: [entity.id], entity, mapping });
     } else if (input.previewViewBox) {
       unmappedEntities.push(entity);
     } else {
-      items.push({
-        id: entity.id,
-        entityIds: [entity.id],
-        entity,
-        mapping: null
-      });
+      items.push({ id: entity.id, entityIds: [entity.id], entity, mapping: null });
     }
   }
 
   if (unmappedEntities.length > 0 && input.previewViewBox) {
-    const compositeViewBox = input.previewViewBox;
+    const frame = input.previewViewBox;
     const compositeEntity: CadImportWidgetEntity = {
       id: UNMAPPED_COMPOSITE_ID,
       type: 'UNMAPPED_COMPOSITE',
-      svgBase64: buildCompositeSvgBase64(unmappedEntities, compositeViewBox),
+      svgBase64: buildCadSvgBase64(unmappedEntities, frame),
       ...unionBounds(unmappedEntities, entity => ({
         x: entity.x, y: entity.y, width: entity.width, height: entity.height
       })),
       blockName: `Background (${unmappedEntities.length} entities)`,
-      ...(() => {
-        if (unmappedEntities.every(hasPreviewBounds)) {
-          const pb = unionBounds(unmappedEntities, entity => ({
-            x: entity.previewX!, y: entity.previewY!,
-            width: entity.previewWidth!, height: entity.previewHeight!
-          }));
-          return { previewX: pb.x, previewY: pb.y, previewWidth: pb.width, previewHeight: pb.height };
-        }
-        return {};
-      })()
+      // Geometry, resource viewBox and dashboard layout MUST use the same frame.
+      // Using the retained-entity union here shrinks/moves the drawing whenever
+      // an exterior entity is deleted or replaced with a live widget.
+      previewX: frame.x,
+      previewY: frame.y,
+      previewWidth: frame.width,
+      previewHeight: frame.height
     };
-    const compositeItem: CadImportWidgetItem<TWidgetInfo> = {
+    return [{
       id: UNMAPPED_COMPOSITE_ID,
-      entityIds: unmappedEntities.map(e => e.id),
+      entityIds: unmappedEntities.map(entity => entity.id),
       entity: compositeEntity,
       mapping: null
-    };
-    return [compositeItem, ...items];
+    }, ...items];
   }
 
   return items;
-}
-
-function unionPreviewBoundsOf(entities: CadImportWidgetEntity[]): { x: number; y: number; width: number; height: number } {
-  if (entities.every(hasPreviewBounds)) {
-    return unionBounds(entities, entity => ({
-      x: entity.previewX!, y: entity.previewY!,
-      width: entity.previewWidth!, height: entity.previewHeight!
-    }));
-  }
-  return unionBounds(entities, entity => ({
-    x: entity.x, y: entity.y, width: entity.width, height: entity.height
-  }));
 }
 
 export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetConfigDefaultsInput): Record<string, any> {
@@ -277,9 +225,7 @@ export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetCo
     }
   };
   if (input.type === 'rpc') {
-    config.targetDevice = {
-      type: 'device'
-    };
+    config.targetDevice = { type: 'device' };
   }
   if (input.scadaSymbolUrl) {
     config.settings.scadaSymbolUrl = input.scadaSymbolUrl;

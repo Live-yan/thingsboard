@@ -26,6 +26,7 @@ const layout: DashboardLayout = {
   gridSettings: {
     layoutType: 'default' as LayoutType,
     columns: 24,
+    minColumns: 48,
     margin: 10,
     outerMargin: true,
     autoFillHeight: true
@@ -60,7 +61,8 @@ assert.equal(layout.gridSettings.columns, 1000);
 assert.equal(layout.gridSettings.margin, 0);
 assert.equal(layout.gridSettings.outerMargin, false);
 assert.equal(layout.gridSettings.autoFillHeight, false);
-assert.equal(layout.gridSettings.rowHeight, 35);
+assert.equal(layout.gridSettings.minColumns, 1000);
+assert.equal(layout.gridSettings.rowHeight, undefined);
 
 assert.equal(layoutCtx.gridSettings, layout.gridSettings);
 assert.equal(layoutCtx.widgetLayouts, layout.widgets);

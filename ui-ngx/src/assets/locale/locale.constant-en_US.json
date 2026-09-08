@@ -2032,6 +2032,8 @@
         "view-format": "View format",
         "import-from-cad": "Import from CAD",
         "cad-import-dialog": {
+      "fidelity-warning": "Conversion warnings ({{count}}): some CAD content may be missing or approximated",
+      "fidelity-acknowledge": "I have reviewed the warnings and accept importing the supported content.",
             "title": "Import from CAD",
             "step-upload": "Upload CAD File",
             "step-preview": "Select Elements",

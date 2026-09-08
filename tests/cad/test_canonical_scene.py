@@ -58,7 +58,16 @@ def test_nested_instances_own_their_attributes_and_keep_original_layer_color(tmp
     for group, entity in zip(groups, manifest['entities']):
         asset = ET.parse(tmp_path / 'out' / entity['svgFile']).getroot()
         owned = next(node for node in asset if node.tag.endswith('g'))
+        # v3 assets use local coordinates for float32-safe browser geometry;
+        # preview has a global translation, resource has an equivalent local one.
+        preview_transform = group.attrib.pop('transform')
+        asset_transform = owned.attrib.pop('transform')
         assert ET.tostring(group) == ET.tostring(owned)
+        import re
+        gx, gy = map(float, re.findall(r'[-+0-9.]+', preview_transform))
+        lx, ly = map(float, re.findall(r'[-+0-9.]+', asset_transform))
+        assert gx == pytest.approx(lx + entity['previewX'], abs=1e-7)
+        assert gy == pytest.approx(ly + entity['previewY'], abs=1e-7)
         assert len(list(group)) > 1  # circle and actual attribute glyph paths
     assert any(node.get('stroke') == '#ff0000' for node in groups[0].iter())
     assert document.blocks.get('PUMP').is_alive  # conversion never modifies the source definition

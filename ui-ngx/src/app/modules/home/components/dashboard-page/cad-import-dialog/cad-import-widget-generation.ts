@@ -72,6 +72,7 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
   /** Unmapped entities form one static background occupying this entire frame. */
+  backgroundColor?: string;
   previewViewBox?: { x: number; y: number; width: number; height: number };
 }
 
@@ -169,7 +170,7 @@ function planCadImportWidgetItems<TWidgetInfo = any>(
     const compositeEntity: CadImportWidgetEntity = {
       id: UNMAPPED_COMPOSITE_ID,
       type: 'UNMAPPED_COMPOSITE',
-      svgBase64: buildComposite(unmappedEntities, frame),
+      svgBase64: buildComposite(unmappedEntities, frame, { backgroundColor: input.backgroundColor }),
       ...unionBounds(unmappedEntities, entity => ({
         x: entity.x, y: entity.y, width: entity.width, height: entity.height
       })),
@@ -302,7 +303,7 @@ export async function buildCadImportWidgetItemsAsync<TWidgetInfo = any>(input: C
   if (background && input.previewViewBox) {
     const ids = new Set(background.entityIds);
     background.entity.svgBase64 = await buildCadSvgBase64Async(input.entities.filter(entity => ids.has(entity.id)),
-      input.previewViewBox, options);
+      input.previewViewBox, { ...options, backgroundColor: input.backgroundColor });
   }
   return items;
 }

@@ -21,6 +21,8 @@ export interface CadPerEntityResult {
   sourceEntityCount?: number;
   unrenderedEntityCount?: number;
   skippedPrimitiveCount?: number;
+  backgroundColor?: string;
+  warnings?: { handle: string; type: string; reason: string }[];
   manifest: CadEntityInfo[];
   modelspaceBounds?: { minX: number; maxX: number; minY: number; maxY: number };
   previewTransform?: PreviewTransform;

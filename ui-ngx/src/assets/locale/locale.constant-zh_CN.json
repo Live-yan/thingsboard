@@ -2022,6 +2022,8 @@
     "view-format": "视图格式",
     "import-from-cad": "从CAD导入",
     "cad-import-dialog": {
+      "fidelity-warning": "转换告警（{{count}}）：部分 CAD 内容可能缺失或被近似处理",
+      "fidelity-acknowledge": "我已检查告警，确认仅导入受支持的内容。",
       "title": "从CAD导入",
       "step-upload": "上传CAD文件",
       "step-preview": "选择元素",

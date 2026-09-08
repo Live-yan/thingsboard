@@ -28,15 +28,19 @@ import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 import ezdxf
 from ezdxf.addons.drawing import Frontend, RenderContext, layout, svg, recorder
 from ezdxf.addons.drawing.config import BackgroundPolicy, Configuration, ImagePolicy
+from ezdxf.fonts import fonts
+from ezdxf.render import hatching
 from ezdxf.math import BoundingBox2d, Vec2
+from cad_svg_precision import PrecisionSvgRenderer, number
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 COORDINATE_SPACE = 100_000
 MAX_RECORDS = 200_000
 MAX_VERTICES = 2_000_000
@@ -48,9 +52,10 @@ class SceneLimitError(ValueError):
     """Fail explicitly rather than silently dropping part of a complex drawing."""
 
 
-class SceneRenderer(svg.SVGRenderBackend):
-    def __init__(self, page, settings):
+class SceneRenderer(PrecisionSvgRenderer):
+    def __init__(self, page, settings, origins):
         super().__init__(page, settings)
+        self.origins = origins
         self.container = self.entities
         self.groups = {}
         self.stroke_widths = {}
@@ -62,9 +67,34 @@ class SceneRenderer(svg.SVGRenderBackend):
                 'data-cad-entity-id': 'cad-' + handle,
                 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
                 'fill-rule': 'evenodd',
+                'transform': f'translate({number(self.origin.x)} {number(self.origin.y)})',
             })
             self.groups[handle] = group
         return self.groups[handle]
+
+    def draw_point(self, pos, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_point(pos, properties)
+
+    def draw_line(self, start, end, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_line(start, end, properties)
+
+    def draw_solid_lines(self, lines, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_solid_lines(lines, properties)
+
+    def draw_path(self, path, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_path(path, properties)
+
+    def draw_filled_paths(self, paths, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_filled_paths(paths, properties)
+
+    def draw_filled_polygon(self, points, properties):
+        self.origin = self.origins[properties.handle]
+        super().draw_filled_polygon(points, properties)
 
     def add_strokes(self, d, properties):
         if not d:
@@ -74,7 +104,7 @@ class SceneRenderer(svg.SVGRenderBackend):
         self.stroke_widths[properties.handle] = max(width, self.stroke_widths.get(properties.handle, 0))
         ET.SubElement(self.group(properties), 'path', {
             'd': d, 'fill': 'none', 'stroke': color,
-            'stroke-opacity': str(opacity), 'stroke-width': str(width),
+            'stroke-opacity': str(opacity), 'stroke-width': number(width),
         })
 
     def add_filling(self, d, properties):
@@ -113,14 +143,14 @@ class SceneRecorder(svg.SVGBackend):
         super().store(record, properties._replace(handle=self.owner))
 
     def make_backend(self, page, settings):
-        self.renderer = SceneRenderer(page, settings)
+        self.renderer = SceneRenderer(page, settings, {handle: bb.extmin for handle, bb in bounds_by_handle(self.records).items()})
         return self.renderer
 
 
 class SceneFrontend(Frontend):
     def __init__(self, ctx, backend):
         super().__init__(ctx, backend, config=Configuration(
-            background_policy=BackgroundPolicy.WHITE,
+            background_policy=BackgroundPolicy.DEFAULT,
             image_policy=ImagePolicy.IGNORE,
             hatching_timeout=5.0,
         ))
@@ -128,6 +158,7 @@ class SceneFrontend(Frontend):
         self.depth = 0
         self.skipped_count = 0
         self.warnings = []
+        self.warned_fonts = set()
 
     def draw_entity(self, entity, properties):
         if self.depth >= MAX_NESTING:
@@ -139,15 +170,68 @@ class SceneFrontend(Frontend):
             self.scene_backend.owner = handle
         self.depth += 1
         try:
+            if entity.dxftype() in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF') and entity.doc is not None:
+                style = entity.doc.styles.get(entity.dxf.get('style', 'Standard'))
+                for font in (style.dxf.get('font', ''), style.dxf.get('bigfont', '')):
+                    if font and font not in self.warned_fonts and not fonts.font_manager.has_font(font):
+                        self.warned_fonts.add(font)
+                        if len(self.warnings) < 100:
+                            self.warnings.append({'handle': self.scene_backend.owner, 'type': 'FONT',
+                                'reason': 'Source font is unavailable; substitute glyphs/metrics may differ: ' + font[:200]})
+            if entity.dxftype() == 'IMAGE':
+                # Never fetch arbitrary image paths from an uploaded document.
+                self.skip_entity(entity, 'External raster IMAGE is not embedded in the upload; image content is not rendered')
+                return
+            if entity.dxftype() == 'INSERT':
+                block = entity.block()
+                if block is not None and block.block.is_xref and not len(block):
+                    self.skip_entity(entity, 'External XREF content requires a bound/self-contained drawing')
+                    return
             super().draw_entity(entity, properties)
         finally:
             self.depth -= 1
+
+    def draw_hatch_pattern(self, polygon, paths, properties):
+        # ezdxf's default accumulates all lines and returns a partial hatch after
+        # timeout; dense patterns can silently become a solid fill. Neither is
+        # acceptable for an editable CAD import. Stream bounded chunks or fail.
+        if polygon.pattern is None or not polygon.pattern.lines:
+            return
+        deadline = time.monotonic() + self.config.hatching_timeout
+        properties.linetype_pattern = tuple()
+        ocs = polygon.ocs()
+        elevation = polygon.dxf.elevation.z
+        pending = []
+
+        def timed_out():
+            if time.monotonic() > deadline:
+                raise SceneLimitError('CAD hatch rendering timed out; simplify the pattern or split the drawing')
+            return False
+
+        try:
+            for baseline in hatching.pattern_baselines(polygon,
+                    min_hatch_line_distance=self.config.min_hatch_line_distance, jiggle_origin=True):
+                timed_out()
+                for line in hatching.hatch_paths(baseline, paths, timed_out):
+                    for start, end in baseline.pattern_renderer(line.distance).render(line.start, line.end):
+                        timed_out()
+                        if ocs.transform:
+                            start = ocs.to_wcs((start.x, start.y, elevation))
+                            end = ocs.to_wcs((end.x, end.y, elevation))
+                        pending.append((start, end))
+                        if len(pending) >= 1024:
+                            self.pipeline.draw_solid_lines(pending, properties)
+                            pending = []
+        except hatching.DenseHatchingLinesError as error:
+            raise SceneLimitError('CAD hatch pattern is too dense; refusing a misleading solid-fill fallback') from error
+        if pending:
+            self.pipeline.draw_solid_lines(pending, properties)
 
     def skip_entity(self, entity, reason):
         self.skipped_count += 1
         if len(self.warnings) < 100:
             self.warnings.append({'handle': entity.dxf.get('handle', ''),
-                                  'type': entity.dxftype(), 'reason': str(reason)})
+                                  'type': entity.dxftype(), 'reason': str(reason)[:500]})
 
 
 def file_sha256(path: Path):
@@ -188,6 +272,11 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
     backend = SceneRecorder(max_records, max_vertices)
     frontend = SceneFrontend(RenderContext(document), backend)
     frontend.draw_layout(modelspace)
+    paper_layouts = [space.name for space in document.layouts
+                     if space.name != 'Model' and any(e.dxftype() != 'VIEWPORT' for e in space)]
+    if paper_layouts and len(frontend.warnings) < 100:
+        frontend.warnings.append({'handle': '', 'type': 'PAPERSPACE',
+                                  'reason': 'Only Model space is imported; paper-space geometry exists in: ' + ', '.join(paper_layouts)[:400]})
     wcs = bounds_by_handle(backend.records)
     output_folder.mkdir(parents=True, exist_ok=True)
     entities_dir = output_folder / 'entities'
@@ -197,7 +286,7 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                 'preview': 'preview.svg', 'entities': entities, 'totalCount': 0,
                 'sourceEntityCount': len(modelspace), 'skippedCount': frontend.skipped_count,
                 'unrenderedEntityCount': len(modelspace),
-                'warnings': frontend.warnings, 'units': document.header.get('$INSUNITS', 0)}
+                'warnings': frontend.warnings, 'availableLayouts': paper_layouts, 'units': document.header.get('$INSUNITS', 0)}
     if backend.records:
         render_bounds = backend.player().bbox()
         if not all(math.isfinite(v) for v in (*render_bounds.extmin, *render_bounds.extmax)):
@@ -213,14 +302,17 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                     settings=layout.Settings(fit_page=True, output_coordinate_space=COORDINATE_SPACE))
         root.attrib.pop('width', None)
         root.attrib.pop('height', None)
-        # Only the backend-created background is removed, never a CAD primitive.
-        root.remove(backend.renderer.background)
+        # Preserve the renderer's canvas policy, including ACI 7 and true white.
+        # A transparent export on an unrelated dashboard theme hides real strokes.
+        background = backend.renderer.background
+        manifest['backgroundColor'] = background.get('fill')
+        background.set('data-cad-background', 'true')
         transformed = bounds_by_handle(backend.records)
         matrix = backend.transformation_matrix
         origin = matrix.transform((0, 0, 0))
-        ex = matrix.transform((1, 0, 0))
-        ey = matrix.transform((0, 1, 0))
-        a, b, c, d = ex.x-origin.x, ex.y-origin.y, ey.x-origin.x, ey.y-origin.y
+        # Read coefficients directly; subtracting two translated basis points
+        # loses scale precision for large WCS offsets.
+        a, b, c, d = matrix[0, 0], matrix[0, 1], matrix[1, 0], matrix[1, 1]
         x, y, width, height = map(float, root.attrib['viewBox'].split())
         manifest.update({
             'previewViewBox': {'x': x, 'y': y, 'width': width, 'height': height},
@@ -230,6 +322,7 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
             'scale': a, 'translateX': origin.x, 'translateY': origin.y, 'yFlip': d < 0,
         })
         written = 0
+        canvas_min_x, canvas_min_y, canvas_max_x, canvas_max_y = x, y, x + width, y + height
 
         def write_svg(path, element):
             nonlocal written
@@ -246,13 +339,18 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
             bb = wcs[handle]
             stroke_pad = max(1.0, backend.renderer.stroke_widths.get(handle, 0) / 2 + 1)
             px, py, pw, ph = positive_bounds(transformed[handle], stroke_pad)
+            canvas_min_x, canvas_min_y = min(canvas_min_x, px), min(canvas_min_y, py)
+            canvas_max_x, canvas_max_y = max(canvas_max_x, px + pw), max(canvas_max_y, py + ph)
             entity_id = 'cad-' + handle
             entity_root = ET.Element('svg', {
                 'xmlns': 'http://www.w3.org/2000/svg',
-                'viewBox': f'{px} {py} {pw} {ph}',
-                'data-cad-global-entity': 'true', 'data-cad-entity-id': entity_id,
+                'viewBox': f'0 0 {pw} {ph}',
+                'data-cad-local-entity': 'true', 'data-cad-entity-id': entity_id,
             })
-            entity_root.append(copy.deepcopy(group))
+            local_group = copy.deepcopy(group)
+            origin = backend.renderer.origins[handle]
+            local_group.set('transform', f'translate({number(origin.x - px)} {number(origin.y - py)})')
+            entity_root.append(local_group)
             write_svg(entities_dir / (entity_id + '.svg'), entity_root)
             entities.append({
                 'id': entity_id, 'handle': handle, 'instancePath': ['modelspace', handle],
@@ -262,6 +360,19 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                 'x': bb.extmin.x, 'y': bb.extmin.y, 'width': bb.size.x, 'height': bb.size.y,
                 'previewX': px, 'previewY': py, 'previewWidth': pw, 'previewHeight': ph,
             })
+        # Include stroke extents in the one global frame; tiny drawings with thick
+        # lines otherwise clip even though the entity resource is individually padded.
+        width, height = canvas_max_x - canvas_min_x, canvas_max_y - canvas_min_y
+        root.set('viewBox', f'{canvas_min_x} {canvas_min_y} {width} {height}')
+        for key, value in zip(('x', 'y', 'width', 'height'), (canvas_min_x, canvas_min_y, width, height)):
+            background.set(key, str(value))
+        manifest['previewViewBox'] = dict(x=canvas_min_x, y=canvas_min_y, width=width, height=height)
+        inverse = matrix.copy()
+        inverse.inverse()
+        bounds = BoundingBox2d([inverse.transform((canvas_min_x, canvas_min_y, 0)),
+                               inverse.transform((canvas_max_x, canvas_max_y, 0))])
+        manifest['modelspaceBounds'] = dict(minX=bounds.extmin.x, maxX=bounds.extmax.x,
+                                          minY=bounds.extmin.y, maxY=bounds.extmax.y)
         write_svg(output_folder / 'preview.svg', root)
         manifest['totalCount'] = len(entities)
         manifest['renderedPrimitiveCount'] = len(backend.records)

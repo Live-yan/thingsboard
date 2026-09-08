@@ -304,3 +304,9 @@
     opacity: 0.7;
   }
 }
+
+// Grouping is independent from device mapping; do not use the mapped color.
+.cad-preview-canvas ::ng-deep .cad-entity.grouped:not(.mapped) {
+  filter: drop-shadow(0 0 2px rgba(103, 58, 183, 0.7));
+}
+.preview-toolbar { flex-wrap: wrap; }

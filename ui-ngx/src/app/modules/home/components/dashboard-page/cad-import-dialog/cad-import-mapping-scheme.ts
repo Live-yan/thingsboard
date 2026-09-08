@@ -355,12 +355,12 @@ export const createCadMappingScheme = (
       entityRules.push({ signature: createCadEntitySignature(entity), widgetInfo });
     }
   });
-  const groupRules: CadMappingGroupRule[] = groupMappings.flatMap(group => {
+  const groupRules: CadMappingGroupRule[] = groupMappings.filter(group => !!group.widgetInfo).flatMap(group => {
     const groupEntities = group.entityIds.map(id => entityById.get(id)).filter(Boolean) as CadEntityInfo[];
     return groupEntities.length >= 2 ? [{
       signature: createCadGroupSignature(groupEntities),
       memberSignatures: groupEntities.map(createCadEntitySignature),
-      widgetInfo: group.widgetInfo
+      widgetInfo: group.widgetInfo!
     }] : [];
   });
   return {

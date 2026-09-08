@@ -303,7 +303,7 @@ export async function buildCadSvgBase64Async(entities: CadSvgEntity[], viewBox: 
   for (let i = 0; i < bytes.length; i += 49152) {
     checkAbort(options.signal);
     encoded.push(btoa(String.fromCharCode(...bytes.subarray(i, i + 49152))));
-    if (i % (49152 * 8) === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+    if ((i + 49152) % (49152 * 8) === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
   }
   checkAbort(options.signal);
   return encoded.join('');

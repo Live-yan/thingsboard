@@ -17,6 +17,8 @@
 export interface CadPerEntityResult {
   previewSvgBase64: string;
   schemaVersion?: number;
+  timings?: Record<string, number>;
+  cacheHit?: boolean;
   sceneId?: string;
   sourceEntityCount?: number;
   unrenderedEntityCount?: number;

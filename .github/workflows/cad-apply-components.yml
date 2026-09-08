@@ -1,0 +1,32 @@
+name: Apply verified CAD component changes
+on:
+  push:
+    branches: [feat/cad-editable-components]
+    paths: [.github/workflows/cad-apply-components.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'Live-yan/thingsboard' && github.ref == 'refs/heads/feat/cad-editable-components'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      - name: Apply the exact tested source diff only to this feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 'a04ef93d063f833796d5b0961e194a80e49c0042'
+          cat .github/cad-components-patch/{1,2,3,4,5}.txt | base64 --decode | gzip --decompress > /tmp/cad-components.patch
+          echo '90d21e5496a183243b33220b5650d3977a76f18906b3663c0083b4f263402d6e  /tmp/cad-components.patch' | sha256sum --check
+          git apply --check --index /tmp/cad-components.patch
+          git apply --index /tmp/cad-components.patch
+          git rm -r .github/cad-components-patch .github/workflows/cad-apply-components.yml
+          git diff --cached --check
+          git config user.name 'CAD regression bot'
+          git config user.email 'cad-regression@users.noreply.github.com'
+          git commit -m 'feat(cad): export independent editable components and optional unmapped groups'
+          git push origin HEAD:refs/heads/feat/cad-editable-components

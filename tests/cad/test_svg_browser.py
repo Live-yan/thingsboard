@@ -238,7 +238,7 @@ def test_same_block_instances_delete_save_reload_and_async_export(page):
       restored.restore(dashboard.configuration.widgets.background.config.cadSceneEdits);
       const output = await planApi.buildCadImportWidgetItemsAsync({
         entities: restored.keptEntities, deletedEntityIds: restored.deletedEntityIds,
-        entityMappings: new Map(), groupMappings: [], previewViewBox: frame
+        entityMappings: new Map(), groupMappings: [], previewViewBox: frame, importMode: 'background'
       });
       const svg = new DOMParser().parseFromString(svgApi.decodeCadSvg(output[0].entity.svgBase64), 'image/svg+xml');
       return {retained: output[0].entityIds, removed: svg.querySelectorAll('[data-cad-entity-id=horizontal]').length,
@@ -263,7 +263,7 @@ def test_async_preview_export_yields_to_browser_and_preserves_utf8(page, tmp_pat
         const scene = await svgApi.buildCadSvgSceneAsync(entities, frame);
         const previewTicks = ticks;
         const output = await planApi.buildCadImportWidgetItemsAsync({
-          entities, deletedEntityIds: new Set(), entityMappings: new Map(), groupMappings: [], previewViewBox: frame
+          entities, deletedEntityIds: new Set(), entityMappings: new Map(), groupMappings: [], previewViewBox: frame, importMode: 'background'
         });
         const xml = new DOMParser().parseFromString(svgApi.decodeCadSvg(output[0].entity.svgBase64), 'image/svg+xml');
         return {entities: scene.querySelectorAll('g[data-cad-entity-id]').length,

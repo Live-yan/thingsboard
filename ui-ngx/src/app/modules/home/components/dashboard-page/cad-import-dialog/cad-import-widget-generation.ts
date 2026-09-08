@@ -14,7 +14,8 @@
 /// limitations under the License.
 ///
 
-import { buildCadSvgBase64, buildCadSvgBase64Async, CadSvgBuildOptions, validateCadSvgBounds } from './cad-import-svg';
+import { buildCadSvgBase64, buildCadSvgBase64Async, CadSvgBounds, CadSvgBuildOptions, validateCadSvgBounds } from './cad-import-svg';
+import { cadComponentFrame, cadGridFrame } from './cad-import-grid';
 
 export interface CadImportWidgetPlanInput {
   importEntityCount: number;
@@ -56,7 +57,7 @@ export interface CadImportWidgetEntity {
 export interface CadImportGroupMapping<TWidgetInfo = any> {
   id: string;
   entityIds: string[];
-  widgetInfo: TWidgetInfo;
+  widgetInfo: TWidgetInfo | null;
 }
 
 export interface CadImportWidgetItem<TWidgetInfo = any> {
@@ -71,7 +72,9 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   deletedEntityIds: ReadonlySet<string>;
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
-  /** Unmapped entities form one static background occupying this entire frame. */
+  /** Default: one widget per CAD instance / explicit group. Legacy background
+   * merging is opt-in, never inferred from the presence of a preview frame. */
+  importMode?: 'components' | 'background';
   backgroundColor?: string;
   previewViewBox?: { x: number; y: number; width: number; height: number };
 }
@@ -107,91 +110,72 @@ function unionBounds<T>(
   };
 }
 
-function planCadImportWidgetItems<TWidgetInfo = any>(
-  input: CadImportWidgetItemsInput<TWidgetInfo>, buildComposite = buildCadSvgBase64
-): CadImportWidgetItem<TWidgetInfo>[] {
+interface CadResourceJob {
+  members: CadImportWidgetEntity[];
+  frame: CadSvgBounds;
+  backgroundColor?: string;
+}
+
+function planCadImportWidgetItems<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>) {
   if (input.previewViewBox) validateCadSvgBounds(input.previewViewBox);
+  const grid = input.previewViewBox ? cadGridFrame(input.previewViewBox) : null;
   const order = new Map(input.entities.map((entity, index) => [entity.id, index]));
   const entityById = new Map(input.entities.map(entity => [entity.id, entity]));
   if (entityById.size !== input.entities.length) throw new Error('Duplicate CAD entity ids.');
   const groupByFirstEntityId = new Map<string, CadImportGroupMapping<TWidgetInfo>>();
   const groupedEntityIds = new Set<string>();
-
+  const groupIds = new Set<string>();
   for (const group of input.groupMappings) {
-    const entityIds = [...new Set(group.entityIds)]
-      .filter(id => entityById.has(id) && !input.deletedEntityIds.has(id))
-      .sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-    if (entityIds.length < 2) {
-      continue;
-    }
-    // A stale/imported mapping scheme must not duplicate a device or silently
-    // discard another group's members. Let the user resolve the ambiguity.
-    if (entityIds.some(id => groupedEntityIds.has(id))) {
-      throw new Error('Overlapping CAD group mappings. Remove the conflicting mapping before importing.');
-    }
-    const normalizedGroup = { ...group, entityIds };
-    groupByFirstEntityId.set(entityIds[0], normalizedGroup);
+    if (!group.id || groupIds.has(group.id) || entityById.has(group.id)) throw new Error('Duplicate CAD group id.');
+    groupIds.add(group.id);
+    if (group.entityIds.some(id => !entityById.has(id))) throw new Error('Unknown CAD group member.');
+    const entityIds = [...new Set(group.entityIds)].filter(id => !input.deletedEntityIds.has(id))
+      .sort((a, b) => order.get(a)! - order.get(b)!);
+    if (entityIds.length < 2) continue;
+    if (entityIds.some(id => groupedEntityIds.has(id))) throw new Error('Overlapping CAD group mappings.');
+    groupByFirstEntityId.set(entityIds[0], { ...group, entityIds });
     entityIds.forEach(id => groupedEntityIds.add(id));
   }
-
   const items: CadImportWidgetItem<TWidgetInfo>[] = [];
-  const unmappedEntities: CadImportWidgetEntity[] = [];
-
-  for (const entity of input.entities) {
-    if (input.deletedEntityIds.has(entity.id)) {
-      continue;
+  const jobs = new Map<string, CadResourceJob>();
+  const background: CadImportWidgetEntity[] = [];
+  const addItem = (id: string, members: CadImportWidgetEntity[], mapping: TWidgetInfo | null) => {
+    let entity = members.length === 1 ? { ...members[0] } : buildCompositeCadEntity(id, members);
+    if (!mapping && grid) {
+      const original = { x: entity.previewX!, y: entity.previewY!, width: entity.previewWidth!, height: entity.previewHeight! };
+      const frame = cadComponentFrame(original, grid).viewBox;
+      entity = { ...entity, id, svgBase64: '', previewX: frame.x, previewY: frame.y,
+        previewWidth: frame.width, previewHeight: frame.height };
+      jobs.set(id, { members, frame }); // transparent; the dashboard owns the canvas color
+    } else if (!mapping && members.length > 1) {
+      const frame = { x: entity.previewX!, y: entity.previewY!, width: entity.previewWidth!, height: entity.previewHeight! };
+      validateCadSvgBounds(frame);
+      jobs.set(id, { members, frame });
     }
+    items.push({ id, entityIds: members.map(member => member.id), entity, mapping });
+  };
+  for (const entity of input.entities) {
+    if (input.deletedEntityIds.has(entity.id)) continue;
     const group = groupByFirstEntityId.get(entity.id);
     if (group) {
-      const groupEntities = group.entityIds.map(id => entityById.get(id)!);
-      items.push({
-        id: group.id,
-        entityIds: group.entityIds,
-        entity: buildCompositeCadEntity(group.id, groupEntities),
-        mapping: group.widgetInfo
-      });
-      continue;
-    }
-    if (groupedEntityIds.has(entity.id)) {
-      continue;
-    }
-    const mapping = input.entityMappings.get(entity.id) || null;
-    if (mapping) {
-      items.push({ id: entity.id, entityIds: [entity.id], entity, mapping });
-    } else if (input.previewViewBox) {
-      unmappedEntities.push(entity);
-    } else {
-      items.push({ id: entity.id, entityIds: [entity.id], entity, mapping: null });
+      addItem(group.id, group.entityIds.map(id => entityById.get(id)!), group.widgetInfo || null);
+    } else if (!groupedEntityIds.has(entity.id)) {
+      const mapping = input.entityMappings.get(entity.id) || null;
+      if (!mapping && input.importMode === 'background' && grid) background.push(entity);
+      else addItem(entity.id, [entity], mapping);
     }
   }
-
-  if (unmappedEntities.length > 0 && input.previewViewBox) {
-    const frame = input.previewViewBox;
-    const compositeEntity: CadImportWidgetEntity = {
-      id: UNMAPPED_COMPOSITE_ID,
-      type: 'UNMAPPED_COMPOSITE',
-      svgBase64: buildComposite(unmappedEntities, frame, { backgroundColor: input.backgroundColor }),
-      ...unionBounds(unmappedEntities, entity => ({
-        x: entity.x, y: entity.y, width: entity.width, height: entity.height
-      })),
-      blockName: `Background (${unmappedEntities.length} entities)`,
-      // Geometry, resource viewBox and dashboard layout MUST use the same frame.
-      // Using the retained-entity union here shrinks/moves the drawing whenever
-      // an exterior entity is deleted or replaced with a live widget.
-      previewX: frame.x,
-      previewY: frame.y,
-      previewWidth: frame.width,
-      previewHeight: frame.height
-    };
-    return [{
-      id: UNMAPPED_COMPOSITE_ID,
-      entityIds: unmappedEntities.map(entity => entity.id),
-      entity: compositeEntity,
-      mapping: null
-    }, ...items];
+  if (background.length && grid) {
+    const id = UNMAPPED_COMPOSITE_ID;
+    if (entityById.has(id) || groupIds.has(id)) throw new Error('Reserved CAD background id.');
+    const frame = input.previewViewBox!;
+    const entity = { ...buildCompositeCadEntity(id, background), type: 'UNMAPPED_COMPOSITE',
+      blockName: `Background (${background.length} entities)`, previewX: frame.x, previewY: frame.y,
+      previewWidth: frame.width, previewHeight: frame.height };
+    jobs.set(id, { members: background, frame, backgroundColor: input.backgroundColor });
+    items.unshift({ id, entityIds: background.map(member => member.id), entity, mapping: null });
   }
-
-  return items;
+  return { items, jobs };
 }
 
 export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetConfigDefaultsInput): Record<string, any> {
@@ -293,17 +277,31 @@ function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]):
 }
 
 export function buildCadImportWidgetItems<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>): CadImportWidgetItem<TWidgetInfo>[] {
-  return planCadImportWidgetItems(input);
+  const { items, jobs } = planCadImportWidgetItems(input);
+  for (const item of items) {
+    const job = jobs.get(item.id);
+    if (job) item.entity.svgBase64 = buildCadSvgBase64(job.members, job.frame, { backgroundColor: job.backgroundColor });
+  }
+  return items;
 }
 
 export async function buildCadImportWidgetItemsAsync<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>,
     options: CadSvgBuildOptions = {}): Promise<CadImportWidgetItem<TWidgetInfo>[]> {
-  const items = planCadImportWidgetItems(input, () => '');
-  const background = items.find(item => item.id === UNMAPPED_COMPOSITE_ID);
-  if (background && input.previewViewBox) {
-    const ids = new Set(background.entityIds);
-    background.entity.svgBase64 = await buildCadSvgBase64Async(input.entities.filter(entity => ids.has(entity.id)),
-      input.previewViewBox, { ...options, backgroundColor: input.backgroundColor });
+  if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+  const { items, jobs } = planCadImportWidgetItems(input);
+  let completed = 0;
+  let started = performance.now();
+  for (const item of items) {
+    if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+    const job = jobs.get(item.id);
+    if (job) item.entity.svgBase64 = await buildCadSvgBase64Async(job.members, job.frame,
+      { signal: options.signal, backgroundColor: job.backgroundColor });
+    options.onProgress?.(++completed, items.length);
+    if (performance.now() - started >= 8 || completed % 32 === 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      started = performance.now();
+    }
   }
+  if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
   return items;
 }

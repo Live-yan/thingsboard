@@ -19,6 +19,7 @@ import type { DashboardLayout, GridSettings, LayoutType, WidgetLayouts } from '@
 export interface CadImportGridSettingsResult {
   targetColumns: number;
   cadAspectRatio?: number;
+  backgroundColor?: string;
 }
 
 export interface CadImportLayoutContext {
@@ -41,6 +42,10 @@ export function applyCadImportGridSettings(layout: DashboardLayout, result: CadI
   layout.gridSettings.columns = result.targetColumns;
   // A previous SCADA minimum overrides columns in DashboardLayoutComponent.
   layout.gridSettings.minColumns = result.targetColumns;
+  if (result.backgroundColor !== undefined) {
+    if (!/^#[0-9a-f]{6}$/i.test(result.backgroundColor)) throw new Error('Invalid CAD canvas color');
+    layout.gridSettings.backgroundColor = result.backgroundColor;
+  }
   layout.gridSettings.margin = 0;
   layout.gridSettings.outerMargin = false;
   layout.gridSettings.autoFillHeight = false;

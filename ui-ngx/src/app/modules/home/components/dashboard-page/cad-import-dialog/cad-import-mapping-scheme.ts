@@ -356,6 +356,7 @@ export const createCadMappingScheme = (
     }
   });
   const groupRules: CadMappingGroupRule[] = groupMappings.flatMap(group => {
+    if (!group.widgetInfo) return [];
     const groupEntities = group.entityIds.map(id => entityById.get(id)).filter(Boolean) as CadEntityInfo[];
     return groupEntities.length >= 2 ? [{
       signature: createCadGroupSignature(groupEntities),

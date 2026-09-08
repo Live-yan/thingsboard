@@ -46,3 +46,20 @@ export function cadBoundsToGrid(bounds: CadSvgBounds, frame: CadGridFrame): { co
   const endRow = clamp(Math.ceil((bounds.y + bounds.height - frame.viewBox.y) * frame.scale - 1e-9), row + 1, frame.rows);
   return { col, row, sizeX: endCol - col, sizeY: endRow - row };
 }
+
+/** Keep the drawing's scale even when tiny components need larger edit handles.
+ * The SVG viewport is expanded to the SAME integer cell edges as the widget;
+ * only transparent padding grows, never the original geometry.
+ */
+export function cadComponentFrame(bounds: CadSvgBounds, frame: CadGridFrame) {
+  const grid = cadBoundsToGrid(bounds, frame);
+  const sizeX = Math.min(frame.columns, Math.max(grid.sizeX, 4));
+  const sizeY = Math.min(frame.rows, Math.max(grid.sizeY, 4));
+  const col = Math.max(0, Math.min(Math.floor(grid.col - (sizeX - grid.sizeX) / 2), frame.columns - sizeX));
+  const row = Math.max(0, Math.min(Math.floor(grid.row - (sizeY - grid.sizeY) / 2), frame.rows - sizeY));
+  return { col, row, sizeX, sizeY, viewBox: {
+    x: frame.viewBox.x + col / frame.scale,
+    y: frame.viewBox.y + row / frame.scale,
+    width: sizeX / frame.scale, height: sizeY / frame.scale
+  } };
+}

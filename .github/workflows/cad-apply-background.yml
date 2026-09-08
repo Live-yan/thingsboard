@@ -1,0 +1,22 @@
+name: Apply reviewed CAD background integration
+on:
+  push:
+    branches: [fix/cad-background-visibility]
+    paths: [.github/workflows/cad-apply-background.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'Live-yan/thingsboard'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply hash-guarded source integration
+        run: |
+          python .github/apply-cad-background.py
+          git diff --check
+          git add ui-ngx/src/app/modules/home/components/dashboard-page/cad-import-dialog tests/cad/conftest.py
+          git rm .github/apply-cad-background.py
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(cad): integrate reversible background and foreground visibility settings'
+          git push origin HEAD:fix/cad-background-visibility

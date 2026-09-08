@@ -22,6 +22,7 @@ never changes its shared BLOCK definition or another INSERT.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -29,6 +30,7 @@ import math
 import os
 import re
 import time
+from time import perf_counter
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -39,6 +41,7 @@ from ezdxf.fonts import fonts
 from ezdxf.render import hatching
 from ezdxf.math import BoundingBox2d, Vec2
 from cad_svg_precision import PrecisionSvgRenderer, number
+from cad_fonts import CadFontContext, font_basename
 
 SCHEMA_VERSION = 3
 COORDINATE_SPACE = 100_000
@@ -171,13 +174,20 @@ class SceneFrontend(Frontend):
         self.depth += 1
         try:
             if entity.dxftype() in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF') and entity.doc is not None:
-                style = entity.doc.styles.get(entity.dxf.get('style', 'Standard'))
-                for font in (style.dxf.get('font', ''), style.dxf.get('bigfont', '')):
-                    if font and font not in self.warned_fonts and not fonts.font_manager.has_font(font):
-                        self.warned_fonts.add(font)
-                        if len(self.warnings) < 100:
-                            self.warnings.append({'handle': self.scene_backend.owner, 'type': 'FONT',
-                                'reason': 'Source font is unavailable; substitute glyphs/metrics may differ: ' + font[:200]})
+                style_name = entity.dxf.get('style', 'Standard')
+                warning = self.ctx.font_warning(style_name) if isinstance(self.ctx, CadFontContext) else None
+                if warning and warning[0].lower() not in self.warned_fonts:
+                    self.warned_fonts.add(warning[0].lower())
+                    if len(self.warnings) < 100:
+                        self.warnings.append({'handle': self.scene_backend.owner, 'type': 'FONT', 'reason': warning[1]})
+                # Bigfont composition is not implemented by the drawing backend.
+                style = entity.doc.styles.get(style_name)
+                bigfont = font_basename(style.dxf.get('bigfont', ''))
+                if bigfont and ('big:' + bigfont.lower()) not in self.warned_fonts:
+                    self.warned_fonts.add('big:' + bigfont.lower())
+                    if len(self.warnings) < 100:
+                        self.warnings.append({'handle': self.scene_backend.owner, 'type': 'BIGFONT',
+                            'reason': 'Bigfont composition is unsupported; check text glyphs: ' + bigfont[:200]})
             if entity.dxftype() == 'IMAGE':
                 # Never fetch arbitrary image paths from an uploaded document.
                 self.skip_entity(entity, 'External raster IMAGE is not embedded in the upload; image content is not rendered')
@@ -259,10 +269,14 @@ def positive_bounds(bounds, pad):
 
 def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                   max_records=MAX_RECORDS, max_vertices=MAX_VERTICES,
-                  max_output_bytes=MAX_OUTPUT_BYTES):
+                  max_output_bytes=MAX_OUTPUT_BYTES, web_bundle=None):
     if min(max_entities, max_records, max_vertices, max_output_bytes) <= 0:
         raise ValueError('CAD conversion limits must be positive')
+    started = perf_counter()
+    timings = {}
+    web_bundle = (os.environ.get('TB_CAD_WEB_BUNDLE') == '1') if web_bundle is None else web_bundle
     document = ezdxf.readfile(str(dxf_path))
+    timings['readDxfMs'] = (perf_counter() - started) * 1000
     modelspace = document.modelspace()
     if len(modelspace) > max_entities:
         raise SceneLimitError(f'Entity count {len(modelspace)} exceeds max {max_entities}')
@@ -270,8 +284,13 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
     if len(source_hash) != 64 or any(c not in '0123456789abcdef' for c in source_hash):
         raise ValueError('Invalid CAD source SHA-256')
     backend = SceneRecorder(max_records, max_vertices)
-    frontend = SceneFrontend(RenderContext(document), backend)
+    stage = perf_counter()
+    frontend = SceneFrontend(CadFontContext(document), backend)
+    timings['fontSetupMs'] = (perf_counter() - stage) * 1000
+    stage = perf_counter()
     frontend.draw_layout(modelspace)
+    timings['recordGeometryMs'] = (perf_counter() - stage) * 1000
+    stage = perf_counter()
     paper_layouts = [space.name for space in document.layouts
                      if space.name != 'Model' and any(e.dxftype() != 'VIEWPORT' for e in space)]
     if paper_layouts and len(frontend.warnings) < 100:
@@ -280,12 +299,14 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
     wcs = bounds_by_handle(backend.records)
     output_folder.mkdir(parents=True, exist_ok=True)
     entities_dir = output_folder / 'entities'
-    entities_dir.mkdir(exist_ok=True)
+    if not web_bundle:
+        entities_dir.mkdir(exist_ok=True)
     entities = []
     manifest = {'schemaVersion': SCHEMA_VERSION, 'sceneId': source_hash,
-                'preview': 'preview.svg', 'entities': entities, 'totalCount': 0,
+                'preview': None if web_bundle else 'preview.svg', 'entities': entities, 'totalCount': 0,
                 'sourceEntityCount': len(modelspace), 'skippedCount': frontend.skipped_count,
                 'unrenderedEntityCount': len(modelspace),
+                'timings': timings, 'resourceMode': 'inline' if web_bundle else 'files',
                 'warnings': frontend.warnings, 'availableLayouts': paper_layouts, 'units': document.header.get('$INSUNITS', 0)}
     if backend.records:
         render_bounds = backend.player().bbox()
@@ -331,6 +352,7 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
             if written > max_output_bytes:
                 raise SceneLimitError(f'CAD SVG output exceeds {max_output_bytes} bytes')
             path.write_bytes(data)
+            return data
 
         for handle, group in backend.renderer.groups.items():
             source = document.entitydb.get(handle)
@@ -347,16 +369,29 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                 'viewBox': f'0 0 {pw} {ph}',
                 'data-cad-local-entity': 'true', 'data-cad-entity-id': entity_id,
             })
-            local_group = copy.deepcopy(group)
+            local_group = copy.copy(group) if web_bundle else copy.deepcopy(group)
             origin = backend.renderer.origins[handle]
             local_group.set('transform', f'translate({number(origin.x - px)} {number(origin.y - py)})')
             entity_root.append(local_group)
-            write_svg(entities_dir / (entity_id + '.svg'), entity_root)
+            if web_bundle:
+                # One bounded manifest avoids thousands of open/stat/realpath/read
+                # operations on Windows and no duplicate preview is serialized.
+                data = ET.tostring(entity_root, encoding='utf-8')
+                if len(data) > 4 * 1024 * 1024:
+                    raise SceneLimitError('A CAD instance exceeds 4 MiB; split this block')
+                encoded = base64.b64encode(data).decode('ascii')
+                written += len(encoded)
+                if written > max_output_bytes:
+                    raise SceneLimitError(f'CAD bundle exceeds {max_output_bytes} bytes')
+                resource = {'svgBase64': encoded}
+            else:
+                write_svg(entities_dir / (entity_id + '.svg'), entity_root)
+                resource = {'svgFile': f'entities/{entity_id}.svg'}
             entities.append({
                 'id': entity_id, 'handle': handle, 'instancePath': ['modelspace', handle],
                 'type': source.dxftype(), 'layer': source.dxf.get('layer', '0'),
                 'blockName': source.dxf.name if source.dxftype() == 'INSERT' else None,
-                'svgFile': f'entities/{entity_id}.svg',
+                **resource,
                 'x': bb.extmin.x, 'y': bb.extmin.y, 'width': bb.size.x, 'height': bb.size.y,
                 'previewX': px, 'previewY': py, 'previewWidth': pw, 'previewHeight': ph,
             })
@@ -373,11 +408,17 @@ def convert_scene(dxf_path: Path, output_folder: Path, *, max_entities=5000,
                                inverse.transform((canvas_max_x, canvas_max_y, 0))])
         manifest['modelspaceBounds'] = dict(minX=bounds.extmin.x, maxX=bounds.extmax.x,
                                           minY=bounds.extmin.y, maxY=bounds.extmax.y)
-        write_svg(output_folder / 'preview.svg', root)
+        if not web_bundle:
+            write_svg(output_folder / 'preview.svg', root)
         manifest['totalCount'] = len(entities)
         manifest['renderedPrimitiveCount'] = len(backend.records)
         manifest['unrenderedEntityCount'] = len(modelspace) - len(entities)
-    (output_folder / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, allow_nan=False), encoding='utf-8')
-    return {'preview': str(output_folder / 'preview.svg') if entities else None,
+    timings['svgAndResourcesMs'] = (perf_counter() - stage) * 1000
+    timings['sceneTotalMs'] = (perf_counter() - started) * 1000
+    payload = json.dumps(manifest, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    if len(payload) > max_output_bytes:
+        raise SceneLimitError(f'CAD manifest exceeds {max_output_bytes} bytes')
+    (output_folder / 'manifest.json').write_bytes(payload)
+    return {'preview': str(output_folder / 'preview.svg') if entities and not web_bundle else None,
             'manifest': str(output_folder / 'manifest.json'),
             'totalCount': len(entities), 'entities': entities}

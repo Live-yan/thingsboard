@@ -16,6 +16,7 @@
 package org.thingsboard.server.config;
 
 import lombok.Data;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
@@ -32,5 +33,9 @@ public class CadConfig {
     private int maxEntities = 5000;
     private int maxConcurrentConversions = 2;
     private int maxOutputSizeMb = 64;
+    @Value("${cad.cache-size-mb:${CAD_CACHE_SIZE_MB:16}}")
+    private int cacheSizeMb = 16;
+    @Value("${cad.cache-ttl-seconds:${CAD_CACHE_TTL_SECONDS:60}}")
+    private int cacheTtlSeconds = 60;
 
 }

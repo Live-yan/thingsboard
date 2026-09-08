@@ -61,6 +61,7 @@ class DefaultCadService implements CadService {
     private final InstallScripts installScripts;
 
     private String resolvedScriptPath;
+    private CadResultCache resultCache;
     private final AtomicInteger activeConversions = new AtomicInteger();
     private final Map<TenantId, Boolean> activeTenants = new ConcurrentHashMap<>();
 
@@ -71,6 +72,8 @@ class DefaultCadService implements CadService {
                 cadConfig.getConversionTimeoutSeconds() <= 0) {
             throw new IllegalArgumentException("CAD conversion limits must be positive");
         }
+        resultCache = new CadResultCache((long) cadConfig.getCacheSizeMb() * 1024 * 1024,
+                TimeUnit.SECONDS.toNanos(cadConfig.getCacheTtlSeconds()));
         resolvedScriptPath = resolveScriptPath();
         if (!Files.exists(Path.of(resolvedScriptPath))) {
             log.warn("CAD Python script not found at: {}", resolvedScriptPath);
@@ -106,18 +109,46 @@ class DefaultCadService implements CadService {
             activeConversions.decrementAndGet();
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "A CAD conversion is already running for this tenant");
         }
+        long started = System.nanoTime();
         Path tempDir = null;
         try {
             tempDir = createTempDir(tenantId);
             Path inputFile = tempDir.resolve("input" + CadUploadIO.extension(name));
             String sourceHash = CadUploadIO.copy(content, size, name, inputFile,
                     (long) cadConfig.getMaxFileSizeMb() * 1024 * 1024);
+            double uploadMs = elapsedMs(started);
+            // Tenant, bytes, file format and all conversion limits are part of the
+            // key. Cache only validated per-entity results, never user-supplied SVG.
+            String cacheKey = tenantId.getId() + ":" + sourceHash + ":" + CadUploadIO.extension(name)
+                    + ":" + cadConfig.getMaxEntities() + ":" + cadConfig.getMaxOutputSizeMb() + ":" + scriptRevision();
+            byte[] cached = perEntity ? resultCache.get(cacheKey) : null;
+            if (cached != null) {
+                CadPerEntityResult result = objectMapper.readValue(cached, CadPerEntityResult.class);
+                result.setCacheHit(true);
+                result.setTimings(Map.of("uploadMs", uploadMs, "requestTotalMs", elapsedMs(started)));
+                return result;
+            }
+            long converting = System.nanoTime();
             Path outputDir = Files.createDirectories(tempDir.resolve("output"));
             runPythonConversion(inputFile, outputDir, perEntity, sourceHash);
             checkOutputBudget(outputDir);
+            double conversionMs = elapsedMs(converting);
+            long reading = System.nanoTime();
             if (perEntity) {
                 CadPerEntityResult result = readPerEntityResults(outputDir);
                 result.setSceneId(sourceHash);
+                Map<String, Double> timings = new java.util.LinkedHashMap<>(result.getTimings());
+                timings.put("uploadMs", uploadMs);
+                timings.put("pythonAndDwgMs", conversionMs);
+                timings.put("readResultMs", elapsedMs(reading));
+                timings.put("requestTotalMs", elapsedMs(started));
+                result.setTimings(timings);
+                long estimate = result.getManifest().stream()
+                        .mapToLong(entity -> entity.getSvgBase64().length() + 1024L).sum();
+                if (estimate > 0 && estimate <= resultCache.maxEntryBytes()) {
+                    resultCache.put(cacheKey, objectMapper.writeValueAsBytes(result));
+                }
+                log.info("CAD conversion timings (ms), tenant {}: {}", tenantId, timings);
                 return result;
             }
             return readConversionResults(outputDir);
@@ -131,6 +162,22 @@ class DefaultCadService implements CadService {
             cleanupTempDir(tempDir);
             activeTenants.remove(tenantId);
             activeConversions.decrementAndGet();
+        }
+    }
+
+    private static double elapsedMs(long start) {
+        return (System.nanoTime() - start) / 1_000_000.0;
+    }
+
+    private String scriptRevision() throws IOException {
+        // Invalidate results when any adjacent Python module changes in place.
+        try (Stream<Path> paths = Files.list(Path.of(resolvedScriptPath).toAbsolutePath().getParent())) {
+            StringBuilder revision = new StringBuilder();
+            for (Path file : paths.filter(p -> p.toString().endsWith(".py")).sorted().toList()) {
+                revision.append(file.getFileName()).append(':').append(Files.size(file))
+                        .append(':').append(Files.getLastModifiedTime(file).toMillis()).append(';');
+            }
+            return revision.toString();
         }
     }
 
@@ -153,6 +200,7 @@ class DefaultCadService implements CadService {
         ProcessBuilder builder = new ProcessBuilder(command)
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(stderr.toFile());
         builder.environment().put("TB_CAD_SOURCE_SHA256", sourceHash);
+        if (perEntity) builder.environment().put("TB_CAD_WEB_BUNDLE", "1");
         builder.environment().put("TB_CAD_MAX_OUTPUT_BYTES", Long.toString((long) cadConfig.getMaxOutputSizeMb() * 1024 * 1024));
         Process process = builder.start();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(cadConfig.getConversionTimeoutSeconds());
@@ -247,14 +295,22 @@ class DefaultCadService implements CadService {
         for (var entry : entries) {
             String id = entry.path("id").asText();
             if (id.isEmpty() || !ids.add(id)) throw new IOException("Duplicate or missing CAD instance identity");
-            Path svgPath = outputDir.resolve(entry.path("svgFile").asText()).normalize();
-            if (!svgPath.startsWith(outputDir) || !Files.isRegularFile(svgPath, LinkOption.NOFOLLOW_LINKS) ||
-                    !svgPath.toRealPath().startsWith(outputDir.toRealPath())) throw new IOException("Invalid CAD entity resource path");
-            if (Files.size(svgPath) > 4 * 1024 * 1024) throw new IOException("A single CAD instance is too complex; split this block before import");
-            String svgContent = Files.readString(svgPath, StandardCharsets.UTF_8);
+            String svgContent;
+            String svgBase64;
+            if (entry.path("svgBase64").isTextual()) {
+                svgBase64 = entry.path("svgBase64").asText();
+                svgContent = CadInlineResource.decode(svgBase64);
+            } else {
+                Path svgPath = outputDir.resolve(entry.path("svgFile").asText()).normalize();
+                if (!svgPath.startsWith(outputDir) || !Files.isRegularFile(svgPath, LinkOption.NOFOLLOW_LINKS) ||
+                        !svgPath.toRealPath().startsWith(outputDir.toRealPath())) throw new IOException("Invalid CAD entity resource path");
+                if (Files.size(svgPath) > 4 * 1024 * 1024) throw new IOException("A single CAD instance is too complex; split this block before import");
+                svgContent = Files.readString(svgPath, StandardCharsets.UTF_8);
+                svgBase64 = Base64.getEncoder().encodeToString(svgContent.getBytes(StandardCharsets.UTF_8));
+            }
             if (containsUnsafeContent(svgContent)) throw new IOException("Unsafe CAD entity resource");
             var entity = new CadEntityInfo(id, entry.path("type").asText(),
-                    Base64.getEncoder().encodeToString(svgContent.getBytes(StandardCharsets.UTF_8)),
+                    svgBase64,
                     finite(entry, "x"), finite(entry, "y"), finite(entry, "width"), finite(entry, "height"),
                     entry.path("blockName").isNull() ? null : entry.path("blockName").asText(),
                     finite(entry, "previewX"), finite(entry, "previewY"),
@@ -266,6 +322,15 @@ class DefaultCadService implements CadService {
         }
         CadPerEntityResult result = new CadPerEntityResult();
         result.setManifest(entities);
+        Map<String, Double> timings = new java.util.LinkedHashMap<>();
+        var fields = manifest.path("timings").fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (field.getValue().isNumber() && Double.isFinite(field.getValue().doubleValue()) && field.getValue().doubleValue() >= 0) {
+                timings.put(field.getKey(), field.getValue().doubleValue());
+            }
+        }
+        result.setTimings(timings);
         result.setSchemaVersion(manifest.path("schemaVersion").asInt(1));
         result.setSourceEntityCount(manifest.path("sourceEntityCount").asInt(entities.size()));
         result.setUnrenderedEntityCount(manifest.path("unrenderedEntityCount").asInt());

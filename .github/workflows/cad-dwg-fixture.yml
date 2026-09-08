@@ -1,0 +1,65 @@
+# Copyright © 2016-2026 The Thingsboard Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: CAD real DWG fixture
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'files/*.dwg'
+      - 'application/src/main/data/scripts/cad/**'
+      - 'tests/cad/**'
+      - '.github/workflows/cad-dwg-fixture.yml'
+  pull_request:
+    paths:
+      - 'files/*.dwg'
+      - 'application/src/main/data/scripts/cad/**'
+      - 'tests/cad/**'
+      - '.github/workflows/cad-dwg-fixture.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dwg-fixture-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  dwg-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build test-only LibreDWG 0.13.3
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 https://ftp.gnu.org/gnu/libredwg/libredwg-0.13.3.tar.xz -o "$RUNNER_TEMP/libredwg.tar.xz"
+          tar -xf "$RUNNER_TEMP/libredwg.tar.xz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/libredwg-0.13.3"
+          ./configure --disable-bindings --disable-shared --disable-write CFLAGS='-O1' > configure.log
+          make -j2 > build.log 2>&1
+          echo "$RUNNER_TEMP/libredwg-0.13.3/programs" >> "$GITHUB_PATH"
+      - name: Inspect and convert the real DWG (not ODA equivalence)
+        run: |
+          set -euo pipefail
+          python -m pip install ezdxf==1.4.4 Pillow==11.3.0
+          mkdir -p cad-dwg-artifacts
+          git rev-parse HEAD > cad-dwg-artifacts/revision.txt
+          dwgread -O JSON -o cad-dwg-artifacts/source.json files/testfile.dwg 2> cad-dwg-artifacts/decoder-read.log
+          dwg2dxf -o cad-dwg-artifacts/testfile.dxf files/testfile.dwg 2> cad-dwg-artifacts/decoder-dxf.log
+          python tests/cad/profile_real_fixture.py cad-dwg-artifacts/testfile.dxf cad-dwg-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cad-real-dwg-evidence
+          path: cad-dwg-artifacts/
+          retention-days: 3

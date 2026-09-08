@@ -20,6 +20,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import java.util.Map;
 
 @Data
 @AllArgsConstructor
@@ -31,6 +32,8 @@ public class CadPerEntityResult {
     private ModelspaceBounds modelspaceBounds;
     private PreviewTransform previewTransform;
 
+    private Map<String, Double> timings = Map.of();
+    private boolean cacheHit;
     private String sceneId;
     private int schemaVersion;
     private int sourceEntityCount;

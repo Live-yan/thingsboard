@@ -14,6 +14,8 @@
 /// limitations under the License.
 ///
 
+import { CadBackgroundSettings, cadBackgroundTransform, cadCanvasColor } from './cad-import-background';
+
 /** Shared SVG scene for the editable preview and the static dashboard background.
  * Entity assets are already positioned by the converter. Never normalize them a
  * second time or paint over a deleted entity's bounding box.
@@ -199,9 +201,11 @@ export interface CadSvgBuildOptions {
   signal?: AbortSignal;
   onProgress?: (processed: number, total: number) => void;
   backgroundColor?: string;
+  background?: CadBackgroundSettings;
 }
 
-function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>): Generator<SVGGElement> {
+function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>, options: CadSvgBuildOptions): Generator<SVGGElement> {
+  const transform = cadBackgroundTransform(options.background);
   const seen = new Set<string>();
   const scope = 'cad-' + crypto.getRandomValues(new Uint32Array(4)).join('-');
   for (let index = 0; index < entities.length; index++) {
@@ -211,6 +215,7 @@ function* sceneGroups(entities: CadSvgEntity[], deleted: ReadonlySet<string>): G
     seen.add(entity.id);
     if (!entity.svgBase64) throw new Error(`Missing SVG for CAD entity ${entity.id}.`);
     const svg = isolateEntitySvg(decodeCadSvg(entity.svgBase64), `${scope}-${index}`);
+    transform(svg);
     const local = viewBoxOf(svg);
     const target = svg.getAttribute('data-cad-global-entity') === 'true' ? local : {
       x: entity.previewX!, y: entity.previewY!, width: entity.previewWidth!, height: entity.previewHeight!
@@ -233,7 +238,8 @@ function emptyScene(viewBox: CadSvgBounds, options: CadSvgBuildOptions = {}): SV
   scene.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
   scene.setAttribute('data-cad-scene', 'true');
   scene.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  if (options.backgroundColor) {
+  cadCanvasColor(options.backgroundColor || '#ffffff', options.background);
+  if (options.backgroundColor && options.background?.mode !== 'remove') {
     if (!/^#[0-9a-f]{6}$/i.test(options.backgroundColor)) throw new Error('Invalid CAD background color.');
     const background = document.createElementNS(SVG_NS, 'rect');
     for (const key of ['x', 'y', 'width', 'height'] as const) background.setAttribute(key, String(viewBox[key]));
@@ -248,7 +254,7 @@ function emptyScene(viewBox: CadSvgBounds, options: CadSvgBuildOptions = {}): SV
 export function buildCadSvgScene(entities: CadSvgEntity[], viewBox: CadSvgBounds,
                                  deletedEntityIds: ReadonlySet<string> = new Set(), options: CadSvgBuildOptions = {}): SVGSVGElement {
   const scene = emptyScene(viewBox, options);
-  for (const group of sceneGroups(entities, deletedEntityIds)) scene.appendChild(group);
+  for (const group of sceneGroups(entities, deletedEntityIds, options)) scene.appendChild(group);
   return scene;
 }
 
@@ -262,7 +268,7 @@ export async function buildCadSvgSceneAsync(entities: CadSvgEntity[], viewBox: C
   const scene = emptyScene(viewBox, options);
   let started = performance.now();
   let processed = 0;
-  for (const group of sceneGroups(entities, deletedEntityIds)) {
+  for (const group of sceneGroups(entities, deletedEntityIds, options)) {
     checkAbort(options.signal);
     scene.appendChild(group);
     processed++;

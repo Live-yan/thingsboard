@@ -310,3 +310,14 @@
   filter: drop-shadow(0 0 2px rgba(103, 58, 183, 0.7));
 }
 .preview-toolbar { flex-wrap: wrap; }
+
+.cad-background-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 16px;
+  mat-form-field { min-width: 260px; }
+  label { display: flex; align-items: center; gap: 8px; }
+  .cad-background-hint { flex: 1 1 280px; font-size: 12px; }
+}

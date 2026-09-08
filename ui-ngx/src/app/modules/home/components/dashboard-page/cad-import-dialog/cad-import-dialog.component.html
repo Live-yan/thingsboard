@@ -68,6 +68,24 @@
   @if (step === 'preview' && isLoading) {
     <mat-progress-bar mode="indeterminate" aria-label="Preparing CAD scene"></mat-progress-bar>
   }
+  @if (step !== 'upload') {
+    <div class="cad-background-controls">
+      <mat-form-field subscriptSizing="dynamic">
+        <mat-label>{{ backgroundLabels.title }}</mat-label>
+        <mat-select [(ngModel)]="backgroundMode" (ngModelChange)="backgroundChanged()" [disabled]="isLoading">
+          <mat-option value="preserve">{{ backgroundLabels.preserve }}</mat-option>
+          <mat-option value="remove">{{ backgroundLabels.remove }}</mat-option>
+        </mat-select>
+      </mat-form-field>
+      @if (backgroundMode === 'remove') {
+        <label>{{ backgroundLabels.target }}
+          <input type="color" [(ngModel)]="targetCanvasColor" (ngModelChange)="backgroundChanged()"
+                 [disabled]="isLoading" [attr.aria-label]="backgroundLabels.target">
+        </label>
+      }
+      <span class="cad-background-hint">{{ backgroundLabels.hint }}</span>
+    </div>
+  }
   @switch (step) {
     @case ('upload') {
       <div class="upload-step">
@@ -151,7 +169,7 @@
             </button>
           </div>
         </div>
-        <div class="preview-canvas-wrapper"
+        <div class="preview-canvas-wrapper" [style.background-color]="canvasColor"
              (wheel)="onPreviewWheel($event)"
              (mousedown)="onPreviewMouseDown($event)"
              (contextmenu)="$event.preventDefault()">
@@ -183,7 +201,7 @@
         <div class="entity-list" [attr.inert]="isLoading ? '' : null">
           @for (group of pageGroups; track group.id) {
             <div class="entity-row" [class.mapped]="group.widgetInfo">
-              <div class="entity-thumbnail">
+              <div class="entity-thumbnail" [style.background-color]="canvasColor">
                 <mat-icon>join_inner</mat-icon>
               </div>
               <div class="entity-info">
@@ -206,7 +224,7 @@
           }
           @for (entity of pageEntities; track entity.id) {
             <div class="entity-row" [class.mapped]="mappings.get(entity.id)">
-              <div class="entity-thumbnail">
+              <div class="entity-thumbnail" [style.background-color]="canvasColor">
                  @if (entity.svgBase64) {
                    <img [src]="getEntityThumbnailUrl(entity)" alt="entity" />
                  }

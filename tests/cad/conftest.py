@@ -56,7 +56,7 @@ def page(browser, compiled):
     page = browser.new_page(viewport={'width': 800, 'height': 600})
     page.set_content('<style>body { margin: 0; background: white; } svg { display: block; }</style><div id="scene"></div>')
     page.evaluate('window.cadModules = {}')
-    for name in ('cad-import-svg', 'cad-import-grid', 'cad-import-widget-generation', 'cad-scene-state', 'cad-import-grouping'):
+    for name in ('cad-import-background', 'cad-import-svg', 'cad-import-grid', 'cad-import-widget-generation', 'cad-scene-state', 'cad-import-grouping'):
         source = (compiled / (name + '.js')).read_text(encoding='utf-8')
         page.add_script_tag(content=(
             "cadModules['./" + name + "'] = {};\n"

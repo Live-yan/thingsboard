@@ -14,6 +14,7 @@
 /// limitations under the License.
 ///
 
+import type { CadBackgroundSettings } from './cad-import-background';
 import { buildCadSvgBase64, buildCadSvgBase64Async, CadSvgBuildOptions, validateCadSvgBounds } from './cad-import-svg';
 import { cadBoundsToGrid, cadGridFrame } from './cad-import-grid';
 
@@ -76,6 +77,7 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   /** Editable components are the default. Background merging is an explicit opt-in. */
   outputMode?: 'components' | 'background';
   backgroundColor?: string;
+  background?: CadBackgroundSettings;
   previewViewBox?: { x: number; y: number; width: number; height: number };
 }
 
@@ -332,7 +334,7 @@ export function buildCadImportWidgetItems<TWidgetInfo = any>(input: CadImportWid
     if (item.mapping || !input.previewViewBox) continue;
     const frame = resourceFrame(item, input.previewViewBox);
     setResource(item, frame, buildCadSvgBase64(item.entityIds.map(id => source.get(id)!), frame,
-      { backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
+      { background: input.background, backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
   }
   return items;
 }
@@ -349,7 +351,7 @@ export async function buildCadImportWidgetItemsAsync<TWidgetInfo = any>(input: C
     if (!item.mapping && input.previewViewBox) {
       const frame = resourceFrame(item, input.previewViewBox);
       setResource(item, frame, await buildCadSvgBase64Async(item.entityIds.map(id => source.get(id)!), frame,
-        { signal: options.signal, backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
+        { signal: options.signal, background: input.background, backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
     }
     options.onProgress?.(index + 1, items.length);
     if (performance.now() - started >= 8 || (index + 1) % 50 === 0) {

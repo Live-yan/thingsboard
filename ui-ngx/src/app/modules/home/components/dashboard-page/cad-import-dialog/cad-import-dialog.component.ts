@@ -54,9 +54,10 @@ import {
   cadMappedScadaWidgetConfigDefaults,
   expandCadGridBounds
 } from './cad-import-widget-generation';
-import { buildCadSvgSceneAsync, decodeCadSvg } from './cad-import-svg';
+import { buildCadSvgScene, buildCadSvgSceneAsync, decodeCadSvg } from './cad-import-svg';
 import { cadBoundsToGrid, cadGridFrame } from './cad-import-grid';
 import { CadSceneState, CadSceneSnapshot } from './cad-scene-state';
+import { CadBackgroundSettings, cadCanvasColor } from './cad-import-background';
 import { cadImportWarnings, cadDragMoved, combineCadSelection, expandCadGroupSelection } from './cad-import-grouping';
 import { cadEditorLabels } from './cad-import-editor-labels';
 import {
@@ -123,6 +124,29 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
   conversionWarnings: { type: string; handle: string; reason: string }[] = [];
   fidelityAcknowledged = false;
   hasBlockingWarnings = false;
+  backgroundMode: 'preserve' | 'remove' = 'preserve';
+  targetCanvasColor = '#ffffff';
+  get backgroundSettings(): CadBackgroundSettings {
+    return { mode: this.backgroundMode, canvasColor: this.targetCanvasColor };
+  }
+  get canvasColor(): string {
+    return cadCanvasColor(this.result?.backgroundColor || '#ffffff', this.backgroundSettings);
+  }
+  get backgroundLabels() {
+    return this.translate.currentLang?.startsWith('zh') ? {
+      title: 'CAD 背景', preserve: '保留背景与原色', remove: '去除 CAD 背景（自动适配颜色）',
+      target: '目标画布颜色', hint: '去除的是 CAD 画布底色，不删除实体。低对比白线、文字等会适配目标画布；原图数据不变。'
+    } : {
+      title: 'CAD background', preserve: 'Keep background and original colors', remove: 'Remove CAD background (adapt colors)',
+      target: 'Destination canvas color', hint: 'Only the CAD canvas is removed, not entities. Low-contrast lines and text adapt to this canvas; source data stays unchanged.'
+    };
+  }
+  backgroundChanged(): void {
+    if (this.isLoading) return;
+    this.clearThumbnails();
+    this.previewRendered = false;
+    this.cd.markForCheck();
+  }
   mergeStaticBackground = false;
   get editorLabels() { return cadEditorLabels(this.translate.currentLang); }
   get estimatedWidgetCount(): number {
@@ -397,7 +421,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       // Preview the exact assets that will be imported, not a separately rendered
       // full drawing plus hitboxes. Rebuilding also reapplies all deletions.
       outerSvg = await this.zone.runOutsideAngular(() => buildCadSvgSceneAsync(
-        this.keptEntities, frame, this.deletedEntityIds, { signal: processing.signal, backgroundColor: this.result?.backgroundColor || '#ffffff' }));
+        this.keptEntities, frame, this.deletedEntityIds, { signal: processing.signal, background: this.backgroundSettings, backgroundColor: this.result?.backgroundColor || '#ffffff' }));
       if (processing.signal.aborted) return;
     } catch (error) {
       if (processing.signal.aborted) return;
@@ -991,7 +1015,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
     if (!entity.svgBase64) return '';
     const cached = this.thumbnailUrls.get(entity.id);
     if (cached) return cached;
-    let svg = decodeCadSvg(entity.svgBase64);
+    let svg = new XMLSerializer().serializeToString(buildCadSvgScene([entity], {
+      x: entity.previewX, y: entity.previewY, width: entity.previewWidth, height: entity.previewHeight
+    }, new Set(), { background: this.backgroundSettings, backgroundColor: this.canvasColor }));
     try {
       svg = removeScadaSymbolMetadata(svg);
     } catch {
@@ -1141,8 +1167,9 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
       groupMappings: this.activeGroupMappings(),
       outputMode: this.mergeStaticBackground ? 'background' : 'components',
       previewViewBox: this.targetGrid().viewBox,
+      background: this.backgroundSettings,
       backgroundColor: this.result?.backgroundColor || '#ffffff'
-    }, { signal: processing.signal, backgroundColor: this.result?.backgroundColor || '#ffffff' }))).pipe(
+    }, { signal: processing.signal, background: this.backgroundSettings, backgroundColor: this.result?.backgroundColor || '#ffffff' }))).pipe(
       switchMap(widgetItems => {
         this.importTotal = cadImportWidgetPlan({ importEntityCount: widgetItems.length }).totalWorkItems;
         this.importProgress = 0;
@@ -1151,7 +1178,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         return from(cadImportBatches(widgetItems, processing.signal)).pipe(
           mergeMap((item, index) => defer(() => this.createWidgetForEntity(item.entity, item.mapping)).pipe(
             map(widget => {
-              Object.assign(widget.config, { cadEntityIds: item.entityIds, cadGroupId: item.entityIds.length > 1 ? item.id : null });
+              Object.assign(widget.config, { cadBackground: this.backgroundSettings, cadEntityIds: item.entityIds, cadGroupId: item.entityIds.length > 1 ? item.id : null });
               return { index, widget };
             }),
             catchError(error => {
@@ -1210,7 +1237,7 @@ export class CadImportDialogComponent extends DialogComponent<CadImportDialogCom
         this.dialogRef.close({
           widgets,
           layoutType: 'scada',
-          backgroundColor: this.result?.backgroundColor || '#ffffff',
+          backgroundColor: this.canvasColor,
           targetColumns: this.targetGrid().columns,
           cadAspectRatio: this.previewTransform
             ? this.previewTransform.height / this.previewTransform.width

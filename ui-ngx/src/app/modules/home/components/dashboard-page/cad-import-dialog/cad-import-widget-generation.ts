@@ -15,6 +15,7 @@
 ///
 
 import { buildCadSvgBase64, buildCadSvgBase64Async, CadSvgBuildOptions, validateCadSvgBounds } from './cad-import-svg';
+import { cadBoundsToGrid, cadGridFrame } from './cad-import-grid';
 
 export interface CadImportWidgetPlanInput {
   importEntityCount: number;
@@ -30,6 +31,7 @@ export interface CadMappedScadaWidgetConfigDefaultsInput {
   preserveAspectRatio: boolean;
   stretchToFit?: boolean;
   scadaSymbolUrl?: string;
+  scadaSymbolContent?: string;
 }
 
 export function cadImportWidgetPlan(input: CadImportWidgetPlanInput): CadImportWidgetPlan {
@@ -56,7 +58,7 @@ export interface CadImportWidgetEntity {
 export interface CadImportGroupMapping<TWidgetInfo = any> {
   id: string;
   entityIds: string[];
-  widgetInfo: TWidgetInfo;
+  widgetInfo: TWidgetInfo | null;
 }
 
 export interface CadImportWidgetItem<TWidgetInfo = any> {
@@ -71,7 +73,8 @@ export interface CadImportWidgetItemsInput<TWidgetInfo = any> {
   deletedEntityIds: ReadonlySet<string>;
   entityMappings: Map<string, TWidgetInfo | null>;
   groupMappings: CadImportGroupMapping<TWidgetInfo>[];
-  /** Unmapped entities form one static background occupying this entire frame. */
+  /** Editable components are the default. Background merging is an explicit opt-in. */
+  outputMode?: 'components' | 'background';
   backgroundColor?: string;
   previewViewBox?: { x: number; y: number; width: number; height: number };
 }
@@ -108,7 +111,7 @@ function unionBounds<T>(
 }
 
 function planCadImportWidgetItems<TWidgetInfo = any>(
-  input: CadImportWidgetItemsInput<TWidgetInfo>, buildComposite = buildCadSvgBase64
+  input: CadImportWidgetItemsInput<TWidgetInfo>
 ): CadImportWidgetItem<TWidgetInfo>[] {
   if (input.previewViewBox) validateCadSvgBounds(input.previewViewBox);
   const order = new Map(input.entities.map((entity, index) => [entity.id, index]));
@@ -116,8 +119,13 @@ function planCadImportWidgetItems<TWidgetInfo = any>(
   if (entityById.size !== input.entities.length) throw new Error('Duplicate CAD entity ids.');
   const groupByFirstEntityId = new Map<string, CadImportGroupMapping<TWidgetInfo>>();
   const groupedEntityIds = new Set<string>();
+  const groupIds = new Set<string>();
 
   for (const group of input.groupMappings) {
+    if (!group.id || groupIds.has(group.id) || entityById.has(group.id) || group.id === UNMAPPED_COMPOSITE_ID) {
+      throw new Error('Duplicate or invalid CAD group identity.');
+    }
+    groupIds.add(group.id);
     const entityIds = [...new Set(group.entityIds)]
       .filter(id => entityById.has(id) && !input.deletedEntityIds.has(id))
       .sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
@@ -158,7 +166,7 @@ function planCadImportWidgetItems<TWidgetInfo = any>(
     const mapping = input.entityMappings.get(entity.id) || null;
     if (mapping) {
       items.push({ id: entity.id, entityIds: [entity.id], entity, mapping });
-    } else if (input.previewViewBox) {
+    } else if (input.previewViewBox && input.outputMode === 'background') {
       unmappedEntities.push(entity);
     } else {
       items.push({ id: entity.id, entityIds: [entity.id], entity, mapping: null });
@@ -170,7 +178,7 @@ function planCadImportWidgetItems<TWidgetInfo = any>(
     const compositeEntity: CadImportWidgetEntity = {
       id: UNMAPPED_COMPOSITE_ID,
       type: 'UNMAPPED_COMPOSITE',
-      svgBase64: buildComposite(unmappedEntities, frame, { backgroundColor: input.backgroundColor }),
+      svgBase64: '',
       ...unionBounds(unmappedEntities, entity => ({
         x: entity.x, y: entity.y, width: entity.width, height: entity.height
       })),
@@ -228,7 +236,10 @@ export function cadMappedScadaWidgetConfigDefaults(input: CadMappedScadaWidgetCo
   if (input.type === 'rpc') {
     config.targetDevice = { type: 'device' };
   }
-  if (input.scadaSymbolUrl) {
+  if (input.scadaSymbolContent) {
+    config.settings.scadaSymbolContent = input.scadaSymbolContent;
+    config.settings.scadaSymbolUrl = null;
+  } else if (input.scadaSymbolUrl) {
     config.settings.scadaSymbolUrl = input.scadaSymbolUrl;
     config.settings.scadaSymbolContent = null;
   }
@@ -292,18 +303,73 @@ function buildCompositeCadEntity(id: string, entities: CadImportWidgetEntity[]):
   };
 }
 
+/** Snap the RESOURCE viewport to the same cell envelope as its widget.
+ * Never enlarge the widget then stretch its original SVG: small circles/lines
+ * would change size and alignment relative to neighboring components.
+ */
+function resourceFrame(item: CadImportWidgetItem, frame: { x: number; y: number; width: number; height: number }) {
+  if (item.id === UNMAPPED_COMPOSITE_ID) return frame;
+  if (!hasPreviewBounds(item.entity)) throw new Error('CAD component preview bounds are missing.');
+  const grid = cadGridFrame(frame);
+  const cell = expandCadGridBounds(cadBoundsToGrid({
+    x: item.entity.previewX!, y: item.entity.previewY!,
+    width: item.entity.previewWidth!, height: item.entity.previewHeight!
+  }, grid), grid.columns, grid.rows, 4, 4);
+  return { x: grid.viewBox.x + cell.col / grid.scale,
+    y: grid.viewBox.y + cell.row / grid.scale,
+    width: cell.sizeX / grid.scale, height: cell.sizeY / grid.scale };
+}
+
+function setResource(item: CadImportWidgetItem, frame: { x: number; y: number; width: number; height: number }, svgBase64: string) {
+  item.entity = { ...item.entity, svgBase64, previewX: frame.x, previewY: frame.y,
+    previewWidth: frame.width, previewHeight: frame.height };
+}
+
 export function buildCadImportWidgetItems<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>): CadImportWidgetItem<TWidgetInfo>[] {
-  return planCadImportWidgetItems(input);
+  const items = planCadImportWidgetItems(input);
+  const source = new Map(input.entities.map(entity => [entity.id, entity]));
+  for (const item of items) {
+    if (item.mapping || !input.previewViewBox) continue;
+    const frame = resourceFrame(item, input.previewViewBox);
+    setResource(item, frame, buildCadSvgBase64(item.entityIds.map(id => source.get(id)!), frame,
+      { backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
+  }
+  return items;
 }
 
 export async function buildCadImportWidgetItemsAsync<TWidgetInfo = any>(input: CadImportWidgetItemsInput<TWidgetInfo>,
     options: CadSvgBuildOptions = {}): Promise<CadImportWidgetItem<TWidgetInfo>[]> {
-  const items = planCadImportWidgetItems(input, () => '');
-  const background = items.find(item => item.id === UNMAPPED_COMPOSITE_ID);
-  if (background && input.previewViewBox) {
-    const ids = new Set(background.entityIds);
-    background.entity.svgBase64 = await buildCadSvgBase64Async(input.entities.filter(entity => ids.has(entity.id)),
-      input.previewViewBox, { ...options, backgroundColor: input.backgroundColor });
+  if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+  const items = planCadImportWidgetItems(input);
+  const source = new Map(input.entities.map(entity => [entity.id, entity]));
+  let started = performance.now();
+  for (let index = 0; index < items.length; index++) {
+    if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+    const item = items[index];
+    if (!item.mapping && input.previewViewBox) {
+      const frame = resourceFrame(item, input.previewViewBox);
+      setResource(item, frame, await buildCadSvgBase64Async(item.entityIds.map(id => source.get(id)!), frame,
+        { signal: options.signal, backgroundColor: item.id === UNMAPPED_COMPOSITE_ID ? input.backgroundColor : undefined }));
+    }
+    options.onProgress?.(index + 1, items.length);
+    if (performance.now() - started >= 8 || (index + 1) % 50 === 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      started = performance.now();
+    }
   }
+  if (options.signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
   return items;
+}
+
+/** Yield to input/paint during widget configuration as well as SVG preparation. */
+export async function* cadImportBatches<T>(items: T[], signal?: AbortSignal): AsyncGenerator<T> {
+  let started = performance.now();
+  for (let index = 0; index < items.length; index++) {
+    if (signal?.aborted) throw new DOMException('CAD processing cancelled', 'AbortError');
+    yield items[index];
+    if ((index + 1) % 32 === 0 || performance.now() - started >= 8) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      started = performance.now();
+    }
+  }
 }

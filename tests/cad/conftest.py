@@ -35,7 +35,7 @@ def compiled(tmp_path_factory):
     subprocess.run([
         'tsc', '--strict', '--target', 'es2020', '--module', 'commonjs',
         '--lib', 'es2020,dom', '--outDir', str(output),
-        str(CAD / 'cad-import-widget-generation.ts'), str(CAD / 'cad-scene-state.ts'),
+        str(CAD / 'cad-import-widget-generation.ts'), str(CAD / 'cad-scene-state.ts'), str(CAD / 'cad-import-grouping.ts'),
     ], check=True)
     return output
 
@@ -56,7 +56,7 @@ def page(browser, compiled):
     page = browser.new_page(viewport={'width': 800, 'height': 600})
     page.set_content('<style>body { margin: 0; background: white; } svg { display: block; }</style><div id="scene"></div>')
     page.evaluate('window.cadModules = {}')
-    for name in ('cad-import-svg', 'cad-import-widget-generation', 'cad-scene-state'):
+    for name in ('cad-import-svg', 'cad-import-grid', 'cad-import-widget-generation', 'cad-scene-state', 'cad-import-grouping'):
         source = (compiled / (name + '.js')).read_text(encoding='utf-8')
         page.add_script_tag(content=(
             "cadModules['./" + name + "'] = {};\n"
@@ -90,7 +90,7 @@ def page(browser, compiled):
       ];
       window.items = (entities, deleted = [], mappings = [], groups = []) => planApi.buildCadImportWidgetItems({
         entities, deletedEntityIds: new Set(deleted), entityMappings: new Map(mappings), groupMappings: groups,
-        previewViewBox: frame
+        previewViewBox: frame, outputMode: 'background'
       });
     ''')
     yield page

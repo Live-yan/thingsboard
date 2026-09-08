@@ -31,17 +31,39 @@
     <div class="warning-message" role="status">{{ sceneWarning }}</div>
   }
   @if (conversionWarnings.length) {
-    <div role="alert">
+    <div role="status">
       <details>
-        <summary>{{ 'dashboard.cad-import-dialog.fidelity-warning' | translate: { count: conversionWarnings.length } }}</summary>
+        <summary>
+          @if (hasBlockingWarnings) {
+            {{ 'dashboard.cad-import-dialog.fidelity-warning' | translate: { count: conversionWarnings.length } }}
+          } @else { {{ editorLabels.fonts }} ({{ conversionWarnings.length }}) }
+        </summary>
         @for (warning of conversionWarnings; track $index) {
           <p><strong>{{ warning.type }} {{ warning.handle }}</strong>: {{ warning.reason }}</p>
         }
       </details>
-      <mat-checkbox [(ngModel)]="fidelityAcknowledged" [disabled]="isLoading">
-        {{ 'dashboard.cad-import-dialog.fidelity-acknowledge' | translate }}
-      </mat-checkbox>
+      @if (hasBlockingWarnings) {
+        <mat-checkbox [(ngModel)]="fidelityAcknowledged" [disabled]="isLoading">
+          {{ 'dashboard.cad-import-dialog.fidelity-acknowledge' | translate }}
+        </mat-checkbox>
+      }
     </div>
+  }
+  @if (result?.timings) {
+    <details><summary>{{ editorLabels.timing }}</summary>
+      @if (result.cacheHit) { <p>{{ editorLabels.cached }}</p> }
+      <pre>{{ result.timings | json }}</pre>
+    </details>
+  }
+  @if (step === 'preview' || step === 'map') {
+    <mat-checkbox [(ngModel)]="mergeStaticBackground" [disabled]="isLoading">{{ editorLabels.background }}</mat-checkbox>
+    <p class="preview-hint">{{ editorLabels.planned }}: <strong>{{ estimatedWidgetCount }}</strong></p>
+    @if (estimatedWidgetCount > 500) { <p class="warning-message" role="status">{{ editorLabels.many }}</p> }
+  }
+  @if (step === 'map' && isLoading) {
+    <mat-progress-bar [mode]="importTotal ? 'determinate' : 'indeterminate'"
+                      [value]="importTotal ? importProgress / importTotal * 100 : 0"></mat-progress-bar>
+    <p role="status">{{ editorLabels.preparing }} {{ importProgress }} / {{ importTotal }}</p>
   }
   @if (step === 'preview' && isLoading) {
     <mat-progress-bar mode="indeterminate" aria-label="Preparing CAD scene"></mat-progress-bar>
@@ -98,9 +120,14 @@
           <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="keepSelected()">
             {{ 'dashboard.cad-import-dialog.keep-selected' | translate }}
           </button>
-          <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size === 0" (click)="mapSelectedGroup()">
-            <mat-icon>join_inner</mat-icon>
-            {{ 'dashboard.cad-import-dialog.group-map-selected' | translate }}
+          <button mat-stroked-button color="primary" [disabled]="selectedEntityIds.size < 2" (click)="groupSelected()">
+            <mat-icon>join_inner</mat-icon>{{ editorLabels.group }}
+          </button>
+          <button mat-stroked-button [disabled]="!canUngroupSelection" (click)="ungroupSelected()">
+            <mat-icon>call_split</mat-icon>{{ editorLabels.ungroup }}
+          </button>
+          <button mat-stroked-button [disabled]="selectedEntityIds.size === 0" (click)="mapSelectedGroup()">
+            <mat-icon>link</mat-icon>{{ editorLabels.map }}
           </button>
           <button mat-icon-button [disabled]="!canUndoDelete" (click)="undoDelete()"
                   matTooltip="Restore last deleted instances; device mappings remain cleared">
@@ -127,12 +154,10 @@
         <div class="preview-canvas-wrapper"
              (wheel)="onPreviewWheel($event)"
              (mousedown)="onPreviewMouseDown($event)"
-             (mousemove)="onPreviewMouseMove($event)"
-             (mouseup)="onPreviewMouseUp($event)"
              (contextmenu)="$event.preventDefault()">
           <div #previewCanvas class="cad-preview-canvas"></div>
         </div>
-        <p class="preview-hint">{{ 'dashboard.cad-import-dialog.preview-hint' | translate }}</p>
+        <p class="preview-hint">{{ editorLabels.hint }}</p>
       </div>
     }
     @case ('map') {
@@ -143,7 +168,8 @@
             <input matInput [(ngModel)]="mappingSchemeName"
                    [placeholder]="'dashboard.cad-import-dialog.mapping-scheme-placeholder' | translate">
           </mat-form-field>
-          <button mat-stroked-button color="primary" (click)="saveMappingScheme()">
+          <button mat-stroked-button [disabled]="isLoading || !canApplySavedMappingScheme" (click)="applySavedMappingScheme()">{{ editorLabels.applyScheme }}</button>
+          <button mat-stroked-button color="primary" [disabled]="isLoading" (click)="saveMappingScheme()">
             <mat-icon>save</mat-icon>
             {{ 'dashboard.cad-import-dialog.save-mapping-scheme' | translate }}
           </button>
@@ -153,10 +179,10 @@
             </span>
           }
         </div>
-        <p class="map-hint">{{ 'dashboard.cad-import-dialog.map-hint' | translate }}</p>
+        <p class="map-hint">{{ editorLabels.hint }}</p>
         <div class="entity-list" [attr.inert]="isLoading ? '' : null">
           @for (group of pageGroups; track group.id) {
-            <div class="entity-row mapped">
+            <div class="entity-row" [class.mapped]="group.widgetInfo">
               <div class="entity-thumbnail">
                 <mat-icon>join_inner</mat-icon>
               </div>
@@ -165,9 +191,15 @@
                 <span class="entity-type">{{ 'dashboard.cad-import-dialog.group-type' | translate }}</span>
               </div>
               <div class="entity-mapping">
-                <span class="mapped-widget">{{ group.widgetInfo.title }}</span>
-                <button mat-icon-button color="warn" (click)="removeGroupMapping(group)">
-                  <mat-icon>link_off</mat-icon>
+                <span [class.mapped-widget]="group.widgetInfo">{{ group.widgetInfo?.title || editorLabels.rawGroup }}</span>
+                <button mat-stroked-button (click)="mapGroup(group)">{{ editorLabels.map }}</button>
+                @if (group.widgetInfo) {
+                  <button mat-icon-button (click)="clearGroupMapping(group)" [matTooltip]="editorLabels.clearMapping" [attr.aria-label]="editorLabels.clearMapping">
+                    <mat-icon>link_off</mat-icon>
+                  </button>
+                }
+                <button mat-icon-button (click)="removeGroupMapping(group)" [matTooltip]="editorLabels.ungroup" [attr.aria-label]="editorLabels.ungroup">
+                  <mat-icon>call_split</mat-icon>
                 </button>
               </div>
             </div>
@@ -190,7 +222,7 @@
                     <mat-icon>link_off</mat-icon>
                   </button>
                 } @else {
-                  <span class="unmapped-label">{{ 'dashboard.cad-import-dialog.unmapped' | translate }}</span>
+                  <span class="unmapped-label">{{ editorLabels.rawEntity }}</span>
                   <button mat-stroked-button color="primary" (click)="onEntityClick(entity)">
                     {{ 'dashboard.cad-import-dialog.map' | translate }}
                   </button>
@@ -249,6 +281,11 @@
     <button mat-button [disabled]="isLoading" (click)="goBack()">{{ 'dashboard.cad-import-dialog.back' | translate }}</button>
   }
   <button mat-button (click)="dialogRef.close(null)">{{ 'dashboard.cad-import-dialog.cancel' | translate }}</button>
+  @if (step === 'preview') {
+    <button mat-stroked-button color="primary" [disabled]="isLoading || !canProceed()" (click)="onImportClick()">
+      {{ editorLabels.directImport }}
+    </button>
+  }
   @if (step !== 'review') {
     <button mat-raised-button color="primary" [disabled]="isLoading || !canProceed()" (click)="goNext()">
       @if (isLoading && step === 'map') {

@@ -39,6 +39,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Build test-only LibreDWG 0.13.3
         run: |
           set -euo pipefail
@@ -57,6 +60,16 @@ jobs:
           dwgread -O JSON -o cad-dwg-artifacts/source.json files/testfile.dwg 2> cad-dwg-artifacts/decoder-read.log
           dwg2dxf -o cad-dwg-artifacts/testfile.dxf files/testfile.dwg 2> cad-dwg-artifacts/decoder-dxf.log
           python tests/cad/profile_real_fixture.py cad-dwg-artifacts/testfile.dxf cad-dwg-artifacts
+      - name: Validate editable components from the real DWG
+        env:
+          CAD_REAL_MANIFEST: ${{ github.workspace }}/cad-dwg-artifacts/bundle-0/manifest.json
+          CAD_TEST_ARTIFACTS: ${{ github.workspace }}/cad-dwg-artifacts
+        run: |
+          python -m pip install pytest==9.0.2 playwright==1.57.0
+          python -m playwright install --with-deps chromium
+          npm install --prefix "$RUNNER_TEMP/cad-tools" --no-audit --no-fund typescript@5.9.3
+          export PATH="$RUNNER_TEMP/cad-tools/node_modules/.bin:$PATH"
+          python -m pytest -q tests/cad/test_editable_components.py --junitxml=cad-dwg-artifacts/editable-results.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
